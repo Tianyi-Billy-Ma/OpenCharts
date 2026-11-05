@@ -148,6 +148,11 @@ export async function handleTerminalTrading(
         error:
           "Only entry orders can be cancelled here. Close the position instead.",
       });
+    // Cancelling a partly filled bracket entry also cancels its stop, leaving the filled shares bare.
+    if (order.filledQty > 0)
+      return reply(422, {
+        error: "This entry has partly filled. Close the position instead.",
+      });
     return reply(200, await orders.cancel(id, "terminal"));
   }
   if (

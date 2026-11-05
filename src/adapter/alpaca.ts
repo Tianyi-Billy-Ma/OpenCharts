@@ -327,7 +327,11 @@ export function createAlpacaTrading(
       return positions.map((p) => {
         const name = terminalName(p.symbol);
         const exits = open.filter(
-          (o) => o.side === "sell" && terminalName(o.symbol) === name,
+          // Held legs belong to an entry that has not filled yet; they protect nothing.
+          (o) =>
+            o.side === "sell" &&
+            o.status !== "held" &&
+            terminalName(o.symbol) === name,
         );
         const stop = exits.find((o) => o.stopPrice != null);
         const target = exits.find((o) => o.type === "limit");

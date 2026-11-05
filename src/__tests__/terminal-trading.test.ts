@@ -54,6 +54,23 @@ const trading: Trading = {
   ],
   getOpenOrders: async () => [
     order({}),
+    order({ id: "partial", filledQty: 4 }),
+    // A second BTC entry, not filled yet: its held stop leg must not count for the position.
+    order({
+      id: "btc-entry-2",
+      symbol: "BTC/USD",
+      qty: 0.1,
+      legs: [
+        order({
+          id: "btc-held-stop",
+          symbol: "BTC/USD",
+          side: "sell",
+          type: "stop",
+          status: "held",
+          stopPrice: 59_000,
+        }),
+      ],
+    }),
     order({
       id: "btc-stop",
       symbol: "BTC/USD",
@@ -132,7 +149,13 @@ describe("terminal trading", () => {
     const [btc] = await gateway.getPositions(account!.id);
     expect(btc).toMatchObject({ id: "BTCUSD", side: "LONG", stopLoss: 57_000 });
     const listed = await gateway.getOrders(account!.id);
-    expect(listed.map((o) => o.id)).toEqual(["entry-1", "btc-stop"]);
+    expect(listed.map((o) => o.id)).toEqual([
+      "entry-1",
+      "partial",
+      "btc-entry-2",
+      "btc-held-stop",
+      "btc-stop",
+    ]);
   });
 
   it("sends BUYs through the order desk, so approval and stop rules apply", async () => {
@@ -175,6 +198,9 @@ describe("terminal trading", () => {
     ).rejects.toThrow(/long only/);
     await expect(gateway.cancelOrder("btc-stop")).rejects.toThrow(
       /Close the position/,
+    );
+    await expect(gateway.cancelOrder("partial")).rejects.toThrow(
+      /partly filled/,
     );
     await gateway.cancelOrder("entry-1");
     expect(cancelled).toEqual(["entry-1"]);
