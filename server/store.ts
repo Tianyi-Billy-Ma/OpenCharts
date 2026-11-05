@@ -6,7 +6,7 @@ const { DatabaseSync } = process.getBuiltinModule("node:sqlite") as typeof impor
 
 /**
  * The backend's SQLite database, the source of truth for approvals and
- * Desk Signal events (and, in later milestones, the journal). One file, `data/opencharts.db`
+ * Desk Signal events and the journal. One file, `data/opencharts.db`
  * by default; ":memory:" for tests.
  */
 
@@ -33,7 +33,46 @@ export interface SignalRecord {
   deliveries: Array<{ host: string; ok: boolean; attempts: number; error?: string }>;
 }
 
+/** One journal row: who did what, to which ticker, and why. */
+export interface JournalEntry {
+  id: number;
+  time: number;
+  /** "risk", "trader", "desk", "scanner", "guard" or a bot's own name. */
+  agent: string;
+  ticker: string;
+  /** e.g. "idea", "approve", "reject", "signal", "webhook", "order", "stop", "alert". */
+  action: string;
+  size: number | null;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  reason: string;
+  evidence: string;
+  outcome: string;
+}
+
+export type NewJournalEntry = Partial<Omit<JournalEntry, "id" | "time">> &
+  Pick<JournalEntry, "agent" | "action">;
+
+export const JOURNAL_COLUMNS = [
+  "id",
+  "time",
+  "agent",
+  "ticker",
+  "action",
+  "size",
+  "entry",
+  "stop",
+  "target",
+  "reason",
+  "evidence",
+  "outcome",
+] as const;
+
 export interface Store {
+  addJournal(entry: NewJournalEntry, nowMs?: number): JournalEntry;
+  /** Newest first. */
+  listJournal(options?: { ticker?: string; action?: string; limit?: number }): JournalEntry[];
   /** Saves a new signal. Returns null when this symbol, timeframe and bar is already saved. */
   recordSignal(
     s: Pick<SignalRecord, "symbol" | "timeframe" | "barTime" | "signal" | "detail" | "webhook">,
@@ -72,7 +111,27 @@ export function openStore(path: string): Store {
       deliveries TEXT NOT NULL DEFAULT '[]',
       UNIQUE (symbol, timeframe, bar_time)
     );
+    CREATE TABLE IF NOT EXISTS journal (
+      id INTEGER PRIMARY KEY,
+      time_ms INTEGER NOT NULL,
+      agent TEXT NOT NULL,
+      ticker TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL,
+      size REAL, entry REAL, stop REAL, target REAL,
+      reason TEXT NOT NULL DEFAULT '',
+      evidence TEXT NOT NULL DEFAULT '',
+      outcome TEXT NOT NULL DEFAULT ''
+    );
   `);
+  const insertJournal = db.prepare(
+    `INSERT INTO journal (time_ms, agent, ticker, action, size, entry, stop, target, reason, evidence, outcome)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const journalRows = db.prepare(
+    `SELECT * FROM journal WHERE (? IS NULL OR ticker = ?) AND (? IS NULL OR action = ?)
+     ORDER BY time_ms DESC, id DESC LIMIT ?`,
+  );
+  const num = (v: unknown) => (v == null ? null : Number(v));
   // The UNIQUE key is the webhook dedupe: one POST per ticker per bar.
   const insertSignal = db.prepare(
     `INSERT INTO signals (symbol, timeframe, bar_time, signal, detail, created_ms, webhook)
@@ -105,6 +164,52 @@ export function openStore(path: string): Store {
   const one = db.prepare(`SELECT 1 FROM approvals WHERE ticker = ? AND until_ms > ?`);
 
   return {
+    addJournal(e, nowMs = Date.now()) {
+      const row = {
+        agent: e.agent,
+        ticker: e.ticker ?? "",
+        action: e.action,
+        size: e.size ?? null,
+        entry: e.entry ?? null,
+        stop: e.stop ?? null,
+        target: e.target ?? null,
+        reason: e.reason ?? "",
+        evidence: e.evidence ?? "",
+        outcome: e.outcome ?? "",
+      };
+      const result = insertJournal.run(
+        nowMs,
+        row.agent,
+        row.ticker,
+        row.action,
+        row.size,
+        row.entry,
+        row.stop,
+        row.target,
+        row.reason,
+        row.evidence,
+        row.outcome,
+      );
+      return { id: Number(result.lastInsertRowid), time: nowMs, ...row };
+    },
+    listJournal({ ticker, action, limit = 100 } = {}) {
+      return journalRows
+        .all(ticker ?? null, ticker ?? null, action ?? null, action ?? null, limit)
+        .map((r) => ({
+          id: Number(r.id),
+          time: Number(r.time_ms),
+          agent: String(r.agent),
+          ticker: String(r.ticker),
+          action: String(r.action),
+          size: num(r.size),
+          entry: num(r.entry),
+          stop: num(r.stop),
+          target: num(r.target),
+          reason: String(r.reason),
+          evidence: String(r.evidence),
+          outcome: String(r.outcome),
+        }));
+    },
     recordSignal(s, nowMs = Date.now()) {
       const result = insertSignal.run(
         s.symbol,
@@ -158,4 +263,22 @@ export function addTradingDays(fromMs: number, days: number, crypto: boolean): n
     if (crypto || (weekday !== 0 && weekday !== 6)) left--;
   }
   return d.getTime();
+}
+
+/** The journal as CSV, oldest first, with times in ISO 8601. */
+export function journalCsv(entries: JournalEntry[]): string {
+  const cell = (v: unknown) => {
+    const text = v == null ? "" : String(v);
+    // Quote when needed, and defuse spreadsheet formulas (=, +, -, @).
+    const safe = /^[=+\-@\t\r]/.test(text) && !/^-?\d/.test(text) ? `'${text}` : text;
+    return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+  };
+  const rows = [...entries]
+    .reverse()
+    .map((e) =>
+      JOURNAL_COLUMNS.map((c) => cell(c === "time" ? new Date(e.time).toISOString() : e[c])).join(
+        ",",
+      ),
+    );
+  return [JOURNAL_COLUMNS.join(","), ...rows].join("\n") + "\n";
 }

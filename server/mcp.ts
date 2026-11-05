@@ -17,7 +17,8 @@ export interface McpTool {
   inputSchema: Record<string, unknown>;
   /** Only tokens with this role may see or call the tool. Unset: every token. */
   role?: string;
-  run(args: Record<string, unknown>): Promise<unknown>;
+  /** `role` is the caller's token role, e.g. for the journal's agent column. */
+  run(args: Record<string, unknown>, context: { role: string }): Promise<unknown>;
 }
 
 export interface McpToken {
@@ -152,7 +153,7 @@ export function createMcpHandler(options: {
         if (!tool) return send(res, 200, rpcError(msg.id, -32602, `Unknown tool "${name}"`));
         const args = (msg.params?.arguments ?? {}) as Record<string, unknown>;
         try {
-          const result = await tool.run(typeof args === "object" && args ? args : {});
+          const result = await tool.run(typeof args === "object" && args ? args : {}, { role });
           return reply({
             content: [{ type: "text", text: JSON.stringify(result) }],
             structuredContent: { result },

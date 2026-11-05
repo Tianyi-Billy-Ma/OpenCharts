@@ -4,8 +4,11 @@ import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { createDeskTools } from "./desk-tools.ts";
 import { createMcpHandler, type McpToken } from "./mcp.ts";
+import { createGuard } from "./guard.ts";
+import { createOrderDesk } from "./orders.ts";
 import { createScanner } from "./scanner.ts";
 import { openStore } from "./store.ts";
+import { deliverWebhook } from "./webhooks.ts";
 
 /** `npm run server`: start the backend with opencharts.config.ts and .env. */
 
@@ -24,26 +27,6 @@ if (!credentials) {
 
 const marketData = createAlpacaClient({ credentials });
 const store = openStore(process.env.OPENCHARTS_DB ?? config.dataPath);
-
-// Bots get the desk token; only the Risk Officer gets the risk token.
-const tokens: McpToken[] = [];
-for (const [env, role] of [
-  ["OPENCHARTS_MCP_TOKEN", "desk"],
-  ["OPENCHARTS_RISK_TOKEN", "risk"],
-] as const) {
-  const token = process.env[env];
-  if (!token) continue;
-  if (token.length < 32) {
-    console.warn(`[opencharts] ${env} is shorter than 32 characters, so it is ignored.`);
-    continue;
-  }
-  tokens.push({ token, role });
-}
-const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
-const mcp = tokens.length
-  ? createMcpHandler({ tools: createDeskTools({ config, marketData, store }), tokens, version })
-  : undefined;
-if (!mcp) console.warn("[opencharts] No MCP token set, so /mcp is off. See .env.example.");
 
 // Webhook URLs can hold tokens, so they live in .env with the signing secret.
 const webhookUrls = (process.env.OPENCHARTS_WEBHOOK_URLS ?? "")
@@ -70,6 +53,57 @@ const stopScanner = config.scanner.enabled
   ? createScanner({ config, marketData, store, webhooks }).start()
   : () => {};
 
+/** Owner alerts go to the same webhooks, as {"type":"alert","text":...}. */
+const alert = async (text: string) => {
+  if (!webhooks) return;
+  const body = JSON.stringify({ type: "alert", text });
+  const id = `alert:${Date.now()}`;
+  await Promise.all(webhooks.urls.map((url) => deliverWebhook(url, body, webhooks!.secret, id)));
+};
+const guard =
+  config.guard.enabled && credentials
+    ? createGuard({ config, marketData, trading: marketData, store, alert })
+    : null;
+if (config.guard.enabled && !credentials)
+  console.warn("[opencharts] The position guard needs Alpaca keys, so it is off.");
+const stopGuard = guard ? guard.start() : () => {};
+const orders =
+  config.orders.enabled && credentials
+    ? createOrderDesk({
+        config,
+        marketData,
+        trading: marketData,
+        store,
+        blockedReason: () => guard?.blockedReason() ?? null,
+      })
+    : undefined;
+
+// Bots get the desk token; only the Risk Officer gets the risk token, only the Trader the trader token.
+const tokens: McpToken[] = [];
+for (const [env, role] of [
+  ["OPENCHARTS_MCP_TOKEN", "desk"],
+  ["OPENCHARTS_RISK_TOKEN", "risk"],
+  // Only used when orders.enabled is on: the Trader's order tools.
+  ["OPENCHARTS_TRADER_TOKEN", "trader"],
+] as const) {
+  const token = process.env[env];
+  if (!token) continue;
+  if (token.length < 32) {
+    console.warn(`[opencharts] ${env} is shorter than 32 characters, so it is ignored.`);
+    continue;
+  }
+  tokens.push({ token, role });
+}
+const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
+const mcp = tokens.length
+  ? createMcpHandler({
+      tools: createDeskTools({ config, marketData, store, orders }),
+      tokens,
+      version,
+    })
+  : undefined;
+if (!mcp) console.warn("[opencharts] No MCP token set, so /mcp is off. See .env.example.");
+
 const app = createApp({
   config,
   marketData,
@@ -77,6 +111,7 @@ const app = createApp({
   staticDir: "dist",
   store,
   mcp,
+  guardStatus: guard?.status,
 });
 
 app.server.listen(port, host, () => {
@@ -86,6 +121,7 @@ app.server.listen(port, host, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     stopScanner();
+    stopGuard();
     app.close();
     store.close();
     process.exit(0);

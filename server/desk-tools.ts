@@ -9,6 +9,7 @@ import { isCrypto, timeframeSeconds, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import { newYorkDate, upcomingEvents } from "./events.ts";
 import type { McpTool } from "./mcp.ts";
+import type { OrderDesk } from "./orders.ts";
 import { addTradingDays, type Store } from "./store.ts";
 
 /**
@@ -20,6 +21,8 @@ export interface DeskDeps {
   config: OpenChartsConfig;
   marketData: MarketData;
   store: Store;
+  /** Our order path. Unset: no order tools (the default; see `orders.enabled`). */
+  orders?: OrderDesk;
   now?: () => number;
 }
 
@@ -390,10 +393,11 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
             type: "string",
             description: "ISO 8601 date or time in the future, e.g. 2026-11-12",
           },
+          reason: { type: "string", description: "Why, for the journal" },
         },
         required: ["ticker"],
       },
-      run: async (args) => {
+      run: async (args, { role }) => {
         const ticker = watchlisted(args);
         const at = now();
         const untilArg = str(args, "until");
@@ -402,17 +406,175 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
           : addTradingDays(at, config.approvals.tradingDays, isCrypto(ticker));
         if (!Number.isFinite(until) || until <= at)
           throw new Error(`until must be a future date, got "${untilArg}"`);
-        return approvalView(store.setApproval(ticker, until, at));
+        const approval = store.setApproval(ticker, until, at);
+        store.addJournal(
+          {
+            agent: role,
+            ticker,
+            action: "approve",
+            reason: str(args, "reason") ?? "",
+            outcome: `until ${new Date(until).toISOString()}`,
+          },
+          at,
+        );
+        return approvalView(approval);
       },
     },
     {
       name: "revoke_approval",
       description: "End a ticker's approval now. Risk Officer only.",
       role: "risk",
-      inputSchema: { type: "object", properties: { ticker: symbolArg }, required: ["ticker"] },
-      run: async (args) => {
+      inputSchema: {
+        type: "object",
+        properties: {
+          ticker: symbolArg,
+          reason: { type: "string", description: "Why, for the journal" },
+        },
+        required: ["ticker"],
+      },
+      run: async (args, { role }) => {
         const ticker = watchlisted(args);
-        return { ticker, revoked: store.revokeApproval(ticker, now()) };
+        const revoked = store.revokeApproval(ticker, now());
+        if (revoked)
+          store.addJournal(
+            { agent: role, ticker, action: "revoke", reason: str(args, "reason") ?? "" },
+            now(),
+          );
+        return { ticker, revoked };
+      },
+    },
+    {
+      name: "add_journal_entry",
+      description:
+        'Log an idea, rejection, note or outcome in the desk journal (the source of truth for the Trade Journal). After an order placed outside this server, log action "plan" with its stop: the position guard uses it if the stop goes missing.',
+      inputSchema: {
+        type: "object",
+        properties: {
+          agent: { type: "string", description: 'Who is logging, e.g. "Analyst"' },
+          ticker: symbolArg,
+          action: {
+            type: "string",
+            description: 'What happened, e.g. "idea", "reject", "plan", "note", "outcome"',
+          },
+          size: { type: "number" },
+          entry: { type: "number" },
+          stop: { type: "number" },
+          target: { type: "number" },
+          reason: { type: "string" },
+          evidence: { type: "string" },
+          outcome: { type: "string" },
+        },
+        required: ["agent", "action"],
+      },
+      run: async (args) => {
+        const text = (key: string) => {
+          const v = str(args, key);
+          if (v && v.length > 2000) throw new Error(`${key} is over 2000 characters`);
+          return v;
+        };
+        const agent = text("agent");
+        const action = text("action");
+        if (!agent || !action) throw new Error("agent and action are required");
+        // Order and stop rows come from the backend only, so the guard can trust their stops.
+        if (["order", "stop", "flatten", "alert", "approve", "revoke"].includes(action))
+          throw new Error(`"${action}" rows are written by the backend; use another action`);
+        return store.addJournal(
+          {
+            agent,
+            action,
+            ticker: args.ticker == null ? undefined : symbol(args, "ticker"),
+            size: num(args, "size", 0, Infinity) ?? null,
+            entry: num(args, "entry", 0, Infinity) ?? null,
+            stop: num(args, "stop", 0, Infinity) ?? null,
+            target: num(args, "target", 0, Infinity) ?? null,
+            reason: text("reason"),
+            evidence: text("evidence"),
+            outcome: text("outcome"),
+          },
+          now(),
+        );
+      },
+    },
+    {
+      name: "list_journal",
+      description: "Journal rows, newest first.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ticker: symbolArg,
+          action: { type: "string" },
+          limit: { type: "number", description: "1 to 500, default 50" },
+        },
+      },
+      run: async (args) =>
+        store
+          .listJournal({
+            ticker: args.ticker == null ? undefined : symbol(args, "ticker"),
+            action: str(args, "action"),
+            limit: Math.floor(num(args, "limit", 1, 500) ?? 50),
+          })
+          .map((e) => ({ ...e, time: new Date(e.time).toISOString() })),
+    },
+    ...(deps.orders ? orderTools(deps.orders, watchlisted) : []),
+  ];
+}
+
+/** The Trader's order tools (role "trader"), only when `orders.enabled` is on. */
+function orderTools(
+  orders: OrderDesk,
+  watchlisted: (args: Record<string, unknown>) => string,
+): McpTool[] {
+  return [
+    {
+      name: "place_order",
+      description:
+        "Place a long-only order through the backend, which enforces approvals, a stop on every BUY and the hard limits first. BUY stocks: GTC market bracket (or OTO without a target). BUY crypto: market, then a separate stop-limit. SELL closes the whole position. Trader only.",
+      role: "trader",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ticker: symbolArg,
+          side: { type: "string", enum: ["buy", "sell"] },
+          qty: { type: "number", description: "Shares (whole for stocks) or coins. BUY only." },
+          stop: { type: "number", description: "Stop price, below the market. Required for BUY." },
+          target: { type: "number", description: "Take-profit price (stocks only). Optional." },
+          reason: { type: "string" },
+          evidence: { type: "string" },
+        },
+        required: ["ticker", "side", "reason"],
+      },
+      run: async (args, { role }) => {
+        const side = oneOf(args, "side", ["buy", "sell"]) as "buy" | "sell" | undefined;
+        const reason = str(args, "reason");
+        if (!side || !reason) throw new Error("side and reason are required");
+        return orders.place(
+          {
+            ticker: watchlisted(args),
+            side,
+            qty: num(args, "qty", 0, Infinity),
+            stop: num(args, "stop", 0, Infinity),
+            target: num(args, "target", 0, Infinity),
+            reason,
+            evidence: str(args, "evidence"),
+          },
+          role,
+        );
+      },
+    },
+    {
+      name: "cancel_order",
+      description: "Cancel an open order by its Alpaca id. Trader only.",
+      role: "trader",
+      inputSchema: {
+        type: "object",
+        properties: { orderId: { type: "string" } },
+        required: ["orderId"],
+      },
+      run: async (args, { role }) => {
+        const id = str(args, "orderId");
+        if (!id || !/^[0-9a-f-]{8,64}$/i.test(id))
+          throw new Error("orderId must be an Alpaca order id");
+        return orders.cancel(id, role);
       },
     },
   ];
