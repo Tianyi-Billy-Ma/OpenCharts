@@ -541,6 +541,17 @@ describe("position guard", () => {
     expect(placed[0]).toMatchObject({ type: "stop", qty: "6" });
   });
 
+  it("leaves a queued market SELL alone: the position is already closing", async () => {
+    const exit = order({ id: "exit-1", side: "sell", type: "market", qty: 10 });
+    const { guard, placed, cancelled } = guardSetup({
+      positions: [position({})],
+      open: [exit],
+    });
+    await guard.runOnce();
+    expect(cancelled).toEqual([]);
+    expect(placed).toEqual([]);
+  });
+
   it("falls back to an ATR stop, and uses a stop-limit for crypto", async () => {
     const { guard, placed } = guardSetup({
       positions: [

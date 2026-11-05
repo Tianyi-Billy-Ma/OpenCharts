@@ -143,7 +143,7 @@ export function createGuard(deps: GuardDeps) {
       (o) =>
         sameSymbol(o.symbol, position.symbol) &&
         o.side === "sell" &&
-        !STOP_TYPES.has(o.type) &&
+        o.type === "limit" &&
         o.status !== "held" &&
         // Cancelling one leg of an OCO or bracket cancels its stop too, so leave groups alone.
         !o.legs.some((l) => STOP_TYPES.has(l.type)),
@@ -190,7 +190,12 @@ export function createGuard(deps: GuardDeps) {
       trading.getOpenOrders(),
       trading.getAccount(),
     ]);
-    const stops = allOrders(orders).filter(isLiveStop);
+    // A queued market SELL is already closing the position, so it counts like a stop.
+    const stops = allOrders(orders).filter(
+      (o) =>
+        isLiveStop(o) ||
+        (o.side === "sell" && o.type === "market" && o.status !== "held"),
+    );
 
     for (const position of positions) {
       const ticker = watchName(position, watchlist);
