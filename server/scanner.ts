@@ -2,7 +2,7 @@ import { volumeSma } from "../src/lib/indicators.ts";
 import { isCrypto, timeframeSeconds, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import { deskSignalBars } from "./desk-tools.ts";
-import type { DeskSignalBar } from "../src/lib/desk-signal.ts";
+import { barCloseSeconds, type DeskSignalBar } from "../src/lib/desk-signal.ts";
 import type { Candle } from "../src/services/schemas.ts";
 import type { SignalRecord, Store } from "./store.ts";
 import { deliverWebhook, type DeliverOptions } from "./webhooks.ts";
@@ -170,6 +170,10 @@ export function createScanner(deps: ScannerDeps) {
     // Sent in parallel and awaited at the end, so a slow receiver never delays the next symbol.
     const sending: Promise<void>[] = [];
     for (const symbol of symbols) {
+      // No fetch until the next bar can have closed and settled.
+      const since = lastChecked.get(symbol);
+      const closeSeconds = barCloseSeconds(barSeconds, !isCrypto(symbol));
+      if (since != null && settled < (since + barSeconds + closeSeconds) * 1000) continue;
       try {
         const { bars, candles } = await deskSignalBars(
           deps,
@@ -179,12 +183,11 @@ export function createScanner(deps: ScannerDeps) {
           settled,
         );
         lastError.delete(symbol);
-        const since = lastChecked.get(symbol) ?? -Infinity;
         const newest = bars.at(-1)?.time;
-        if (newest != null) lastChecked.set(symbol, Math.max(newest, since));
+        if (newest != null) lastChecked.set(symbol, Math.max(newest, since ?? -Infinity));
         for (let k = 0; k < bars.length; k++) {
           const bar = bars[k]!;
-          if (!bar.signal || bar.time <= since) continue;
+          if (!bar.signal || (since != null && bar.time <= since)) continue;
           // This bar and the candles before it, for the evidence.
           const history = candles.slice(0, candles.length - bars.length + k + 1);
           const saved = record(symbol, bar, history, at);

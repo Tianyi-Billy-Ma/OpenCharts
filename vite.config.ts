@@ -1,54 +1,59 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
-export default defineConfig({
-  // GitHub Pages serves a project site from /<repo>/, so the demo workflow sets
-  // BASE_PATH. Local builds and self-hosting stay at the domain root.
-  base: process.env.BASE_PATH ?? "/",
-  plugins: [react()],
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-      "@propsim/types": path.resolve(__dirname, "./src/vendor/types.ts"),
+export default defineConfig(({ mode }) => {
+  // The OpenCharts backend (`npm run server`) under `VITE_ADAPTER=alpaca`; else the legacy trader backend.
+  const desk =
+    (process.env.VITE_ADAPTER ?? loadEnv(mode, process.cwd()).VITE_ADAPTER) ===
+    "alpaca";
+  return {
+    // GitHub Pages serves a project site from /<repo>/, so the demo workflow sets
+    // BASE_PATH. Local builds and self-hosting stay at the domain root.
+    base: process.env.BASE_PATH ?? "/",
+    plugins: [react()],
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "./src"),
+        "@propsim/types": path.resolve(__dirname, "./src/vendor/types.ts"),
+      },
     },
-  },
-  build: {
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes("node_modules")) {
-            if (
-              id.includes("/react/") ||
-              id.includes("/react-dom/") ||
-              id.includes("/react-router") ||
-              id.includes("/@radix-ui/") ||
-              id.includes("/@tanstack/") ||
-              id.includes("/zustand/") ||
-              id.includes("/scheduler/")
-            ) {
-              return "vendor-react";
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes("node_modules")) {
+              if (
+                id.includes("/react/") ||
+                id.includes("/react-dom/") ||
+                id.includes("/react-router") ||
+                id.includes("/@radix-ui/") ||
+                id.includes("/@tanstack/") ||
+                id.includes("/zustand/") ||
+                id.includes("/scheduler/")
+              ) {
+                return "vendor-react";
+              }
+              if (id.includes("/lucide-react/")) {
+                return "vendor-icons";
+              }
             }
-            if (id.includes("/lucide-react/")) {
-              return "vendor-icons";
-            }
-          }
+          },
         },
       },
     },
-  },
-  server: {
-    port: 5173,
-    proxy: {
-      // The OpenCharts backend (`npm run server`), for `VITE_ADAPTER=alpaca npm run dev`.
-      "/api": {
-        target: "http://localhost:8787",
-        changeOrigin: true,
-      },
-      "/ws": {
-        target: "ws://localhost:3000",
-        ws: true,
+    server: {
+      port: 5173,
+      proxy: {
+        "/api": {
+          target: desk ? "http://localhost:8787" : "http://localhost:3000",
+          changeOrigin: true,
+        },
+        "/ws": {
+          target: "ws://localhost:3000",
+          ws: true,
+        },
       },
     },
-  },
+  };
 });

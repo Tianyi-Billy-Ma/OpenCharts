@@ -197,7 +197,8 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
         if (!bar) return { symbol: s, timeframe: tf, error: "No closed bars" };
         const m = macd(candles);
         const bb = bollingerBands(candles);
-        const volAvg = last(volumeSma(candles, 20));
+        // The 20 bars before this one, as the signal compares them.
+        const volAvg = last(volumeSma(candles.slice(0, -1), 20));
         const ema = Object.fromEntries(
           config.deskSignal.params.emaPeriods.map((p, i) => [`ema${p}`, round(bar.emas[i])]),
         );

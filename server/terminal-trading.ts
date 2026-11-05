@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Trading } from "./alpaca.ts";
-import type { OrderDesk } from "./orders.ts";
+import { allOrders, type OrderDesk } from "./orders.ts";
 
 /**
  * The terminal's trading routes. Reads come straight from Alpaca; every write
@@ -90,10 +90,7 @@ export async function handleTerminalTrading(
     if (resource === "orders") {
       const open = await trading.getOpenOrders();
       // Legs (stop, target) are orders too; the terminal lists them flat.
-      const flat = open.flatMap(({ legs, ...o }) => [
-        o,
-        ...legs.map(({ legs: _, ...l }) => l),
-      ]);
+      const flat = allOrders(open).map(({ legs: _, ...o }) => o);
       return reply(200, flat);
     }
     return false;

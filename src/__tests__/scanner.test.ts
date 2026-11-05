@@ -161,6 +161,31 @@ describe("signal scanner", () => {
     expect(found.map((f) => [f.signal, f.barTime])).toEqual([["BUY", TODAY - DAY]]);
   });
 
+  it("skips the fetch until another bar can have settled", async () => {
+    let calls = 0;
+    let nowMs = (TODAY + 20 * 60) * 1000;
+    const scanner = createScanner({
+      config,
+      marketData: {
+        getBars: async (r) => {
+          calls++;
+          return marketData.getBars(r);
+        },
+      } as MarketData,
+      store: openStore(":memory:"),
+      webhooks: null,
+      now: () => nowMs,
+      log: () => {},
+    });
+    await scanner.scanOnce();
+    nowMs += 5 * 60_000;
+    await scanner.scanOnce();
+    expect(calls).toBe(1);
+    nowMs = (TODAY + DAY + 20 * 60) * 1000; // today's bar has closed and settled
+    await scanner.scanOnce();
+    expect(calls).toBe(2);
+  });
+
   it("checks the approval when the signal is found, not when the pass started", async () => {
     let now = (TODAY + 20 * 60) * 1000;
     const { impl, calls } = fakeFetch(0);

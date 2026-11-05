@@ -76,7 +76,7 @@ const tokens: McpToken[] = [];
 for (const [env, role] of [
   ["OPENCHARTS_MCP_TOKEN", "desk"],
   ["OPENCHARTS_RISK_TOKEN", "risk"],
-  // Only used when orders.enabled is on: the Trader's order tools.
+  // The Trader: "plan" rows for the guard, and our order tools when orders.enabled is on.
   ["OPENCHARTS_TRADER_TOKEN", "trader"],
 ] as const) {
   const token = process.env[env];
