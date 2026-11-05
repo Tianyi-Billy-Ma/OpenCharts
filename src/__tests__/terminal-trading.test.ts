@@ -20,6 +20,7 @@ const order = (o: Partial<Order>): Order => ({
   type: "market",
   qty: 10,
   filledQty: 0,
+  notional: null,
   status: "accepted",
   stopPrice: null,
   limitPrice: null,
