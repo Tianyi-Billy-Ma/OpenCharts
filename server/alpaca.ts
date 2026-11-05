@@ -1,6 +1,6 @@
 /**
- * A thin Alpaca Market Data client: bars, latest quotes and the live quote
- * stream, for US stocks (free IEX feed) and crypto.
+ * A thin Alpaca client: bars, latest quotes, the live quote stream and news,
+ * for US stocks (free IEX feed) and crypto, plus read-only account positions.
  *
  * Only this file knows Alpaca's URLs and field names. Everything it returns is
  * already in OpenCharts' shape: candles in seconds, oldest first.
@@ -9,6 +9,8 @@
 import type { Candle } from "../src/services/schemas.ts";
 
 const DATA_BASE = "https://data.alpaca.markets";
+const PAPER_BASE = "https://paper-api.alpaca.markets";
+const LIVE_BASE = "https://api.alpaca.markets";
 const STOCK_STREAM = "wss://stream.data.alpaca.markets/v2/iex";
 const CRYPTO_STREAM = "wss://stream.data.alpaca.markets/v1beta3/crypto/us";
 
@@ -35,11 +37,36 @@ export interface AlpacaQuote {
   timestamp: number;
 }
 
+export interface NewsItem {
+  headline: string;
+  summary: string;
+  source: string;
+  url: string;
+  symbols: string[];
+  /** Epoch ms. */
+  time: number;
+}
+
+export interface Position {
+  symbol: string;
+  qty: number;
+  side: string;
+  avgEntryPrice: number;
+  currentPrice: number;
+  marketValue: number;
+  unrealizedPl: number;
+  unrealizedPlPct: number;
+}
+
 export interface MarketData {
   getBars(request: BarsRequest): Promise<Candle[]>;
   getQuote(symbol: string): Promise<AlpacaQuote | null>;
   /** Stream quotes for these symbols. Returns a stop function. */
   streamQuotes(symbols: string[], onQuote: (quote: AlpacaQuote) => void): () => void;
+  /** Newest first. Symbols in Alpaca form; empty means all news. */
+  getNews(symbols: string[], limit: number): Promise<NewsItem[]>;
+  /** Open positions on the account (paper unless `live` was set). */
+  getPositions(): Promise<Position[]>;
 }
 
 const TIMEFRAMES: Record<string, { alpaca: string; seconds: number }> = {
@@ -142,6 +169,8 @@ export interface AlpacaClientOptions {
   fetchImpl?: typeof fetch;
   webSocketImpl?: typeof WebSocket;
   log?: (message: string) => void;
+  /** Use the live trading account instead of paper. Default false. */
+  live?: boolean;
 }
 
 export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketData {
@@ -156,7 +185,7 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
   const getJson = async (url: URL): Promise<unknown> => {
     // Crypto data is public; stock data needs keys.
     if (!creds && !url.pathname.includes("/crypto/")) {
-      throw new Error("Stock data needs Alpaca keys: set ALPACA_KEY_ID and ALPACA_SECRET_KEY.");
+      throw new Error("This needs Alpaca keys: set ALPACA_KEY_ID and ALPACA_SECRET_KEY.");
     }
     const response = await doFetch(url, { headers: headers() });
     if (!response.ok) {
@@ -200,6 +229,48 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
       const q = body.quote ?? body.quotes?.[symbol];
       if (!q) return null;
       return { symbol, bid: q.bp, ask: q.ap, timestamp: Date.parse(q.t) };
+    },
+
+    async getNews(symbols, limit) {
+      const url = new URL(`${DATA_BASE}/v1beta1/news`);
+      // News lists crypto as "BTCUSD".
+      if (symbols.length)
+        url.searchParams.set("symbols", symbols.map((s) => s.replace("/", "")).join(","));
+      url.searchParams.set("limit", String(Math.min(Math.max(1, Math.floor(limit)), 50)));
+      const body = (await getJson(url)) as {
+        news?: Array<{
+          headline: string;
+          summary: string;
+          source: string;
+          url: string;
+          symbols: string[];
+          created_at: string;
+        }>;
+      };
+      return (body.news ?? []).map((n) => ({
+        headline: n.headline,
+        summary: n.summary,
+        source: n.source,
+        url: n.url,
+        symbols: n.symbols,
+        time: Date.parse(n.created_at),
+      }));
+    },
+
+    async getPositions() {
+      const body = (await getJson(
+        new URL(`${options.live ? LIVE_BASE : PAPER_BASE}/v2/positions`),
+      )) as Array<Record<string, string>>;
+      return body.map((p) => ({
+        symbol: p.symbol!,
+        qty: Number(p.qty),
+        side: p.side!,
+        avgEntryPrice: Number(p.avg_entry_price),
+        currentPrice: Number(p.current_price),
+        marketValue: Number(p.market_value),
+        unrealizedPl: Number(p.unrealized_pl),
+        unrealizedPlPct: Number(p.unrealized_plpc) * 100,
+      }));
     },
 
     streamQuotes(symbols, onQuote) {

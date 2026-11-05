@@ -141,7 +141,7 @@ the browser never sees them.
   - Signed with an HMAC header so receivers can verify it came from us.
 - **MCP server** (Streamable HTTP, bearer-token auth) exposing:
   `get_bars`, `get_quote`, `get_indicators`, `desk_signal`, `screen`,
-  `get_news`, `get_events`, `list_signals`, `get_positions`, plus the write
+  `get_news`, `get_events`, `list_signals`, `get_positions`, `list_approvals`, plus the write
   tools `set_approval(ticker, until?)` and `revoke_approval(ticker)`, which only
   the Risk Officer's token may call.
   Order tools (`place_order`, `cancel_order`) exist but are off by default;
@@ -242,7 +242,9 @@ the browser never sees them.
 3. **M2, signals:** indicators + Desk Signal in the backend and on the chart;
    backtest Desk Signal on 3+ years.
 4. **M3, bots:** MCP server + approvals + signal scanner + webhooks; deploy to
-   nd-work2 behind the tunnel.
+   nd-work2 behind the tunnel. Shipped in two parts: M3a (MCP server, read
+   tools, approvals) and M3b (scanner, `list_signals`, `get_events`, webhooks,
+   deploy docs).
 5. **M4, paper desk:** Alpaca paper trading end to end on both order paths,
    hard limits, journal and Sheets export.
 6. **M5, review:** 60 trading days of paper results vs backtest, then the

@@ -1,24 +1,10 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
-import {
-  createServer,
-  type IncomingMessage,
-  type Server,
-  type ServerResponse,
-} from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { Symbol } from "../src/services/schemas.ts";
-import {
-  barCloseSeconds,
-  closedBars,
-  deskSignal,
-} from "../src/lib/desk-signal.ts";
-import {
-  isCrypto,
-  timeframeSeconds,
-  type AlpacaQuote,
-  type MarketData,
-} from "./alpaca.ts";
+import { isCrypto, type AlpacaQuote, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
+import { deskSignalBars } from "./desk-tools.ts";
 
 /**
  * The OpenCharts backend's HTTP surface. The browser talks only to this; the
@@ -30,6 +16,7 @@ import type { OpenChartsConfig } from "./config.ts";
  *   GET /api/quote?symbol
  *   GET /api/stream                  Server-Sent Events: {"type":"tick",...}
  *   GET /api/desk-signal?symbol[&timeframe][&limit]   Desk Signal on closed bars, newest last
+ *   POST /mcp                        MCP server for the desk's bots (see mcp.ts), when tokens are set
  *
  * Anything else is served from the built frontend in `dist/`.
  */
@@ -40,6 +27,8 @@ export interface AppOptions {
   hasKeys: boolean;
   /** Built frontend to serve. Skipped when the folder is missing. */
   staticDir?: string;
+  /** Handles POST /mcp. Unset: /mcp answers 404. */
+  mcp?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 }
 
 const TIMEFRAMES = new Set(["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]);
@@ -60,8 +49,7 @@ const MIME: Record<string, string> = {
 };
 
 /** "BTC/USD" shows in the terminal as "BTCUSD"; stock tickers are unchanged. */
-export const toTerminalName = (alpacaSymbol: string) =>
-  alpacaSymbol.replace("/", "");
+export const toTerminalName = (alpacaSymbol: string) => alpacaSymbol.replace("/", "");
 
 const STOCK_HOURS = [1, 2, 3, 4, 5].map((dayOfWeek) => ({
   dayOfWeek,
@@ -89,17 +77,12 @@ function toSymbol(alpacaSymbol: string): Symbol {
     tradingHoursEnd: crypto ? null : "16:00",
     isActive: true,
     // Read by the market-closed banner; regular US session only.
-    ...(crypto
-      ? {}
-      : { tradingHours: STOCK_HOURS, sessionTimezone: "America/New_York" }),
+    ...(crypto ? {} : { tradingHours: STOCK_HOURS, sessionTimezone: "America/New_York" }),
   } as Symbol;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, {
-    "content-type": "application/json",
-    "cache-control": "no-store",
-  });
+  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
   res.end(JSON.stringify(body));
 }
 
@@ -109,18 +92,10 @@ function optionalNumber(value: string | null): number | undefined | null {
   return Number.isFinite(n) ? n : null; // null = present but invalid
 }
 
-export function createApp(options: AppOptions): {
-  server: Server;
-  close: () => void;
-} {
+export function createApp(options: AppOptions): { server: Server; close: () => void } {
   const { config, marketData, hasKeys } = options;
-  const alpacaSymbols = [
-    ...config.watchlist.stocks,
-    ...config.watchlist.crypto,
-  ];
-  const byTerminalName = new Map(
-    alpacaSymbols.map((s) => [toTerminalName(s), s]),
-  );
+  const alpacaSymbols = [...config.watchlist.stocks, ...config.watchlist.crypto];
+  const byTerminalName = new Map(alpacaSymbols.map((s) => [toTerminalName(s), s]));
   const symbols = alpacaSymbols.map(toSymbol);
 
   // One upstream stream, fanned out to every browser tab.
@@ -148,44 +123,29 @@ export function createApp(options: AppOptions): {
   }, HEARTBEAT_MS);
 
   const staticDir =
-    options.staticDir && existsSync(options.staticDir)
-      ? resolve(options.staticDir)
-      : null;
+    options.staticDir && existsSync(options.staticDir) ? resolve(options.staticDir) : null;
 
-  const handleApi = async (
-    url: URL,
-    req: IncomingMessage,
-    res: ServerResponse,
-  ) => {
+  const handleApi = async (url: URL, req: IncomingMessage, res: ServerResponse) => {
     const symbolParam = url.searchParams.get("symbol") ?? "";
     const alpacaSymbol = byTerminalName.get(symbolParam);
 
     switch (url.pathname) {
       case "/api/health":
-        return sendJson(res, 200, {
-          ok: true,
-          keys: hasKeys,
-          symbols: symbols.length,
-        });
+        return sendJson(res, 200, { ok: true, keys: hasKeys, symbols: symbols.length });
 
       case "/api/symbols":
         return sendJson(res, 200, symbols);
 
       case "/api/candles": {
         const timeframe = url.searchParams.get("timeframe") ?? "";
-        if (!alpacaSymbol)
-          return sendJson(res, 404, {
-            error: `Unknown symbol "${symbolParam}"`,
-          });
+        if (!alpacaSymbol) return sendJson(res, 404, { error: `Unknown symbol "${symbolParam}"` });
         if (!TIMEFRAMES.has(timeframe))
           return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
         const limit = optionalNumber(url.searchParams.get("limit"));
         const fromMs = optionalNumber(url.searchParams.get("fromMs"));
         const toMs = optionalNumber(url.searchParams.get("toMs"));
         if (limit === null || fromMs === null || toMs === null) {
-          return sendJson(res, 400, {
-            error: "limit, fromMs and toMs must be numbers",
-          });
+          return sendJson(res, 400, { error: "limit, fromMs and toMs must be numbers" });
         }
         const candles = await marketData.getBars({
           symbol: alpacaSymbol,
@@ -198,47 +158,24 @@ export function createApp(options: AppOptions): {
       }
 
       case "/api/quote": {
-        if (!alpacaSymbol)
-          return sendJson(res, 404, {
-            error: `Unknown symbol "${symbolParam}"`,
-          });
+        if (!alpacaSymbol) return sendJson(res, 404, { error: `Unknown symbol "${symbolParam}"` });
         const quote = await marketData.getQuote(alpacaSymbol);
         return sendJson(res, 200, quote && { ...quote, symbol: symbolParam });
       }
 
       case "/api/desk-signal": {
-        const timeframe =
-          url.searchParams.get("timeframe") ?? config.deskSignal.timeframe;
+        const timeframe = url.searchParams.get("timeframe") ?? config.deskSignal.timeframe;
         const limit = optionalNumber(url.searchParams.get("limit")) ?? 100;
-        if (!alpacaSymbol)
-          return sendJson(res, 404, {
-            error: `Unknown symbol "${symbolParam}"`,
-          });
-        const seconds = timeframeSeconds(timeframe);
-        if (!seconds)
+        if (!alpacaSymbol) return sendJson(res, 404, { error: `Unknown symbol "${symbolParam}"` });
+        if (!TIMEFRAMES.has(timeframe))
           return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
-        if (limit === null || limit < 1)
-          return sendJson(res, 400, {
-            error: "limit must be a positive number",
-          });
-        // EMA 200 and the 100-bar ATR rank need history before the bars returned.
-        const warmUp =
-          Math.max(...config.deskSignal.params.emaPeriods) +
-          config.deskSignal.params.atrLookback;
-        const bars = await marketData.getBars({
-          symbol: alpacaSymbol,
-          timeframe,
-          limit: warmUp + Math.floor(limit) + 1,
-        });
-        const closeAfter = barCloseSeconds(seconds, !isCrypto(alpacaSymbol));
-        const result = deskSignal(
-          closedBars(bars, closeAfter),
-          config.deskSignal.params,
-        );
+        if (limit === null || limit < 1 || limit > 5000)
+          return sendJson(res, 400, { error: "limit must be a number from 1 to 5000" });
+        const { bars } = await deskSignalBars(options, alpacaSymbol, timeframe, Math.floor(limit));
         return sendJson(res, 200, {
           symbol: symbolParam,
           timeframe,
-          bars: result.slice(-Math.floor(limit)),
+          bars,
         });
       }
 
@@ -263,9 +200,7 @@ export function createApp(options: AppOptions): {
 
   const serveStatic = (url: URL, res: ServerResponse) => {
     if (!staticDir)
-      return sendJson(res, 404, {
-        error: "Frontend not built. Run `npm run build:desk`.",
-      });
+      return sendJson(res, 404, { error: "Frontend not built. Run `npm run build:desk`." });
     // normalize + prefix check keeps requests inside dist/.
     let pathname: string;
     try {
@@ -274,16 +209,12 @@ export function createApp(options: AppOptions): {
       return sendJson(res, 400, { error: "Bad path" });
     }
     let file = normalize(join(staticDir, pathname));
-    if (!file.startsWith(staticDir + sep))
-      return sendJson(res, 403, { error: "Forbidden" });
-    if (!existsSync(file) || statSync(file).isDirectory())
-      file = join(staticDir, "index.html");
+    if (!file.startsWith(staticDir + sep)) return sendJson(res, 403, { error: "Forbidden" });
+    if (!existsSync(file) || statSync(file).isDirectory()) file = join(staticDir, "index.html");
     const hashed = file.startsWith(join(staticDir, "assets") + sep);
     res.writeHead(200, {
       "content-type": MIME[extname(file)] ?? "application/octet-stream",
-      "cache-control": hashed
-        ? "public, max-age=31536000, immutable"
-        : "no-cache",
+      "cache-control": hashed ? "public, max-age=31536000, immutable" : "no-cache",
     });
     createReadStream(file).pipe(res);
   };
@@ -292,11 +223,17 @@ export function createApp(options: AppOptions): {
     let url: URL;
     try {
       // Only the path matters; a fixed origin stops "//host" targets parsing as hosts.
-      url = new URL(
-        `http://localhost${req.url?.startsWith("/") ? req.url : "/"}`,
-      );
+      url = new URL(`http://localhost${req.url?.startsWith("/") ? req.url : "/"}`);
     } catch {
       return sendJson(res, 400, { error: "Bad request URL" });
+    }
+    if (url.pathname === "/mcp" && options.mcp) {
+      options.mcp(req, res).catch((err: unknown) => {
+        console.error("[mcp]", err);
+        if (!res.headersSent) sendJson(res, 500, { error: "Internal error" });
+        else res.end();
+      });
+      return;
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
       return sendJson(res, 405, { error: "Method not allowed" });

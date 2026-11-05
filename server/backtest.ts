@@ -65,8 +65,7 @@ export function runBacktest(
     const entryIndex = i + 1;
     const entry = candles[entryIndex]!.open;
     const atrStop = s.atr != null ? entry - fallbackAtr * s.atr : entry * 0.95;
-    const stop =
-      s.swingLow != null && s.swingLow < entry ? s.swingLow : atrStop;
+    const stop = s.swingLow != null && s.swingLow < entry ? s.swingLow : atrStop;
 
     let exitIndex = entryIndex;
     let exit = candles[entryIndex]!.close;
@@ -96,8 +95,7 @@ export function runBacktest(
 
     // Mark the open position at each close so drawdown counts losses between exits.
     for (let k = entryIndex; k <= exitIndex; k++) {
-      const marked =
-        equity * ((k === exitIndex ? exit : candles[k]!.close) / entry);
+      const marked = equity * ((k === exitIndex ? exit : candles[k]!.close) / entry);
       peak = Math.max(peak, marked);
       maxDrawdown = Math.max(maxDrawdown, 1 - marked / peak);
     }
@@ -123,9 +121,7 @@ export function runBacktest(
   const last = candles[candles.length - 1];
   return {
     trades,
-    winRate: trades.length
-      ? trades.filter((t) => t.returnPct > 0).length / trades.length
-      : 0,
+    winRate: trades.length ? trades.filter((t) => t.returnPct > 0).length / trades.length : 0,
     avgReturnPct: trades.length
       ? trades.reduce((sum, t) => sum + t.returnPct, 0) / trades.length
       : 0,

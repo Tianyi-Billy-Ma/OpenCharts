@@ -13,6 +13,8 @@ COPY --from=build /app/dist ./dist
 COPY server ./server
 COPY src/lib ./src/lib
 COPY opencharts.config.ts package.json ./
+# SQLite lives here; mount a volume on it to keep approvals across rebuilds.
+RUN mkdir data && chown node data
 USER node
 EXPOSE 8787
-CMD ["node", "server/main.ts"]
+CMD ["node", "--disable-warning=ExperimentalWarning", "server/main.ts"]

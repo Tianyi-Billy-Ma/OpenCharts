@@ -86,6 +86,56 @@ ATR is in the top 10% of its last 100 values. It only looks at closed bars.
   exit on SELL, the stop, or after 10 bars. Add `--timeframe 4h`, `--years 5`, or
   `--json`.
 
+## MCP server for bots
+
+The backend is also an [MCP](https://modelcontextprotocol.io) server at
+`POST /mcp` (Streamable HTTP), so AI agents can read the same data and signals
+as the chart. It is off until you set a token in `.env`:
+
+```bash
+OPENCHARTS_MCP_TOKEN=$(openssl rand -hex 32)    # read tools, for every bot
+OPENCHARTS_RISK_TOKEN=$(openssl rand -hex 32)   # adds the approval tools, for the Risk Officer only
+```
+
+Tokens shorter than 32 characters are ignored. Clients send
+`Authorization: Bearer <token>`. Requests from browsers (any `Origin` header)
+are refused.
+
+| Tool | Token | What it does |
+| --- | --- | --- |
+| `get_bars` | any | OHLCV bars, oldest first |
+| `get_quote` | any | Latest bid and ask |
+| `get_indicators` | any | Latest EMA, SMA, RSI, MACD, ATR, Bollinger, volume vs average, swings |
+| `desk_signal` | any | Desk Signal on closed bars, and whether the ticker is approved |
+| `screen` | any | Filter the watchlist by trend, signal, RSI, price and volume ratio |
+| `get_news` | any | Recent Alpaca news |
+| `get_positions` | any | Open positions on the Alpaca paper account |
+| `list_approvals` | any | Live approvals and when each ends |
+| `set_approval(ticker, until?)` | risk | Approve a watchlist ticker; 5 trading days unless `until` is given; calling again renews |
+| `revoke_approval(ticker)` | risk | End an approval now |
+
+Approvals are kept in SQLite at `data/opencharts.db` (change it with
+`dataPath` in `opencharts.config.ts`). Docker keeps it in the
+`opencharts-data` volume.
+
+Example client setup (any MCP client that supports Streamable HTTP and headers):
+
+```json
+{
+  "mcpServers": {
+    "opencharts": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer <OPENCHARTS_MCP_TOKEN>" }
+    }
+  }
+}
+```
+
+To reach it from another machine, publish only `/mcp` through your tunnel on
+its own hostname. The bearer token is its gate, so do not put it behind a
+browser login such as Cloudflare Access.
+
 ## Known limits
 
 - Free stock data is the IEX feed only, about 2% to 3% of US volume. Prices
