@@ -94,8 +94,7 @@ export function closedBars<T extends { time: number }>(
   return candles.slice(0, -1);
 }
 
-const byTime = (points: IndicatorPoint[]) =>
-  new Map(points.map((p) => [p.time, p.value]));
+const byTime = (points: IndicatorPoint[]) => new Map(points.map((p) => [p.time, p.value]));
 
 export function deskSignal(
   candles: CandleData[],
@@ -157,12 +156,10 @@ export function deskSignal(
     const volumeOk = (c.volume ?? 0) >= params.volumeMultiple * prevAvgVol;
     let raw: "BUY" | "SELL" | null = null;
     if (c.close > prevHigh && volumeOk && r > params.rsiThreshold) raw = "BUY";
-    else if (c.close < prevLow && volumeOk && r < 100 - params.rsiThreshold)
-      raw = "SELL";
+    else if (c.close < prevLow && volumeOk && r < 100 - params.rsiThreshold) raw = "SELL";
     if (!raw) return bar;
 
-    if (atrTooHigh(atrSeries, atrIndex.get(c.time), params))
-      bar.filtered = true;
+    if (atrTooHigh(atrSeries, atrIndex.get(c.time), params)) bar.filtered = true;
     else bar.signal = raw;
     return bar;
   });

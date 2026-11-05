@@ -1,8 +1,4 @@
-import {
-  barCloseSeconds,
-  closedBars,
-  deskSignal,
-} from "../src/lib/desk-signal.ts";
+import { barCloseSeconds, closedBars, deskSignal } from "../src/lib/desk-signal.ts";
 import { createAlpacaClient, isCrypto, timeframeSeconds } from "./alpaca.ts";
 import { runBacktest } from "./backtest.ts";
 import { loadConfig } from "./config.ts";
@@ -19,13 +15,9 @@ const flag = (name: string) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const symbol = args.find(
-  (a, i) => !a.startsWith("--") && !args[i - 1]?.startsWith("--"),
-);
+const symbol = args.find((a, i) => !a.startsWith("--") && !args[i - 1]?.startsWith("--"));
 if (!symbol) {
-  console.error(
-    "Usage: npm run backtest -- <SYMBOL> [--timeframe 1d] [--years 3] [--json]",
-  );
+  console.error("Usage: npm run backtest -- <SYMBOL> [--timeframe 1d] [--years 3] [--json]");
   process.exit(1);
 }
 
@@ -47,40 +39,22 @@ const alpaca = createAlpacaClient({
 
 // shortcut: one request caps at 10,000 bars (about 3 years of 1h stock bars); page by date for longer runs.
 const bars = await alpaca
-  .getBars({
-    symbol,
-    timeframe,
-    fromMs: Date.now() - years * 365.25 * 86_400_000,
-    limit: 10_000,
-  })
+  .getBars({ symbol, timeframe, fromMs: Date.now() - years * 365.25 * 86_400_000, limit: 10_000 })
   .catch((err: unknown) => {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   });
 const candles = closedBars(bars, barCloseSeconds(seconds, !isCrypto(symbol)));
-const result = runBacktest(
-  candles,
-  deskSignal(candles, config.deskSignal.params),
-);
+const result = runBacktest(candles, deskSignal(candles, config.deskSignal.params));
 
 if (args.includes("--json")) {
-  console.log(
-    JSON.stringify(
-      { symbol, timeframe, bars: candles.length, ...result },
-      null,
-      2,
-    ),
-  );
+  console.log(JSON.stringify({ symbol, timeframe, bars: candles.length, ...result }, null, 2));
 } else {
   const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
   const day = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
-  console.log(
-    `Desk Signal backtest: ${symbol} ${timeframe}, ${candles.length} closed bars`,
-  );
+  console.log(`Desk Signal backtest: ${symbol} ${timeframe}, ${candles.length} closed bars`);
   if (candles.length)
-    console.log(
-      `  ${day(candles[0]!.time)} to ${day(candles[candles.length - 1]!.time)}`,
-    );
+    console.log(`  ${day(candles[0]!.time)} to ${day(candles[candles.length - 1]!.time)}`);
   console.log(`  trades        ${result.trades.length}`);
   console.log(`  win rate      ${(result.winRate * 100).toFixed(1)}%`);
   console.log(`  avg trade     ${pct(result.avgReturnPct)}`);
