@@ -40,8 +40,9 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // The OpenCharts backend (`npm run server`), for `VITE_ADAPTER=alpaca npm run dev`.
       "/api": {
-        target: "http://localhost:3000",
+        target: "http://localhost:8787",
         changeOrigin: true,
       },
       "/ws": {

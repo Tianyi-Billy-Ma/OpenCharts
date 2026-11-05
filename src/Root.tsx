@@ -12,24 +12,35 @@ import { Terminal } from "./terminal/Terminal.tsx";
  * error boundary — comes from `<OpenChartsProvider>`.
  *
  * `VITE_ADAPTER=binance npm run dev` swaps in the live-market-data example from
- * examples/binance-adapter, loaded lazily so none of its code reaches the
+ * examples/binance-adapter. `VITE_ADAPTER=alpaca` uses the OpenCharts backend
+ * in server/ (Alpaca data). Both load lazily so none of their code reaches the
  * default bundle.
  */
 
-const wantsBinance = import.meta.env.VITE_ADAPTER === "binance";
+const adapterName = ["alpaca", "binance"].includes(import.meta.env.VITE_ADAPTER ?? "")
+  ? (import.meta.env.VITE_ADAPTER as "alpaca" | "binance")
+  : null;
+
+function loadAdapter(): Promise<OpenChartsAdapter> {
+  if (adapterName === "alpaca") {
+    return import("./adapter/alpaca.ts").then(({ createAlpacaAdapter }) => createAlpacaAdapter());
+  }
+  return import("../examples/binance-adapter/binance-adapter.ts").then(
+    ({ createBinancePaperAdapter }) => createBinancePaperAdapter(),
+  );
+}
 
 export function Root() {
   const [adapter, setAdapter] = useState<OpenChartsAdapter | null>(() =>
-    wantsBinance ? null : createDemoAdapter(),
+    adapterName ? null : createDemoAdapter(),
   );
 
   useEffect(() => {
-    if (!wantsBinance) return;
-    import("../examples/binance-adapter/binance-adapter.ts")
-      .then(({ createBinancePaperAdapter }) => createBinancePaperAdapter())
+    if (!adapterName) return;
+    loadAdapter()
       .then(setAdapter)
       .catch((err: unknown) => {
-        console.error("[opencharts] failed to load the Binance adapter; using the demo", err);
+        console.error(`[opencharts] failed to load the ${adapterName} adapter; using the demo`, err);
         setAdapter(createDemoAdapter());
       });
   }, []);

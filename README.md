@@ -209,6 +209,21 @@ npm run build      # outputs to dist/
 npm run preview    # serve the production build locally
 ```
 
+### Self-host with Alpaca data
+
+The `server/` backend serves real US stock and crypto data from Alpaca's free
+plan and keeps your keys off the browser. Requires **Node 22.18+** (or Docker).
+
+```bash
+cp .env.example .env        # add your free Alpaca paper keys
+npm install
+npm run build:desk          # build the terminal for the backend
+npm run server              # http://127.0.0.1:8787
+```
+
+Or `docker compose up`. Edit the watchlist in `opencharts.config.ts`. See
+[docs/self-hosting.md](docs/self-hosting.md).
+
 ## What's real and what's simulated
 
 OpenCharts is a paper terminal, and being precise about this matters more than
@@ -689,7 +704,7 @@ Everything works with no configuration. Optional environment variables:
 
 | Variable | Effect |
 | --- | --- |
-| `VITE_ADAPTER` | Set to `binance` to run the demo against live Binance prices |
+| `VITE_ADAPTER` | `binance` runs the demo against live Binance prices; `alpaca` uses the backend in `server/` |
 | `VITE_API_URL` | Base URL used by the legacy HTTP client in `src/services/api/` |
 
 **OpenCharts ships no analytics or telemetry.** Nothing leaves the browser
@@ -706,6 +721,8 @@ network requests. Drop those components if you want a strictly offline build.
 | `npm run dev` | Start the Vite dev server |
 | `npm run dev:ci` | Dev server bound to `0.0.0.0:5173` |
 | `npm run build` | Production build to `dist/` |
+| `npm run build:desk` | Production build wired to the `server/` backend |
+| `npm run server` | Start the backend (reads `opencharts.config.ts` and `.env`) |
 | `npm run check:size` | Fail if the first-load payload exceeds its budget (run after `build`) |
 | `npm run build:lib` | Build the npm package into `dist-lib/` (fails if any CSS escapes the scope) |
 | `npm run check:package` | Verify the package matches its `exports` (run after `build:lib`) |

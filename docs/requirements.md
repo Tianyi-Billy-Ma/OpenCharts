@@ -38,9 +38,9 @@ for anyone who wants a free charting terminal and MCP server for their own AI
 agents. That means:
 
 1. **Ten-minute quickstart.** A new user with only free Alpaca paper keys runs
-   one command (`docker compose up`, or `npm run build && npm run server`) and sees
+   one command (`docker compose up`, or `npm run build:desk && npm run server`) and sees
    live charts. No other account, domain or tunnel is needed to try it.
-2. **One config file.** Everything user-specific lives in `opencharts.yaml`
+2. **One config file.** Everything user-specific lives in `opencharts.config.ts`
    (watchlist, Desk Signal parameters and timeframe, approval length, risk
    limits, webhook targets) plus a `.env` for secrets. Nothing personal is hard-coded: no host
    names, domains, bot names or file paths from Billy's setup.
@@ -91,7 +91,7 @@ volume rules use daily bars or are backtested on the same feed.
 
 ### 5.2 Default watchlist
 
-The shipped `opencharts.yaml` starts with an AI-themed watchlist, which users
+The shipped `opencharts.config.ts` starts with an AI-themed watchlist, which users
 can replace.
 
 - **Stocks:** NVDA, MSFT, GOOGL, AMZN, META, AMD, AVGO, TSM, PLTR.
@@ -111,7 +111,7 @@ the browser never sees them.
 
 - **Market data proxy** for the web terminal: symbols, candles (seconds,
   oldest first, `toMs` exclusive, per the adapter contract), and a live tick
-  stream (Alpaca websocket relayed over our own websocket).
+  stream (Alpaca websocket relayed to the browser as Server-Sent Events).
 - **Indicators**: SMA, EMA, RSI, MACD, ATR, Bollinger (already in
   `src/lib/indicators.ts`), plus volume vs average and swing highs and lows
   (new, added to the same file).
@@ -194,7 +194,7 @@ the browser never sees them.
   owner and blocks new entries on our order path until it is resolved.
   Optionally (config `missing_stop: flatten`), it closes the position instead.
 - Hard limits (max position size, max open positions, daily loss stop) are set
-  in `opencharts.yaml`. Our order path rejects orders that break them. On the
+  in `opencharts.config.ts`. Our order path rejects orders that break them. On the
   official-MCP path we cannot block orders, so the position guard checks
   positions against the limits every run and alerts on a breach.
 - Secrets (broker keys, webhook secrets, MCP token) live only in `.env` (mode
@@ -232,7 +232,7 @@ the browser never sees them.
 - **Orders:** Alpaca's official MCP, used only by the Trader bot.
 - **Secrets:** 1Password, copied into `.env` on nd-work2.
 - **Risk limits:** taken from the desk rules (`desk-rules-compact.md` in the
-  project files) into `opencharts.yaml`.
+  project files) into `opencharts.config.ts`.
 
 ## 8. Milestones
 
