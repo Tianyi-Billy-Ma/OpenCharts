@@ -159,11 +159,18 @@ export function createOrderDesk(deps: OrderDeskDeps) {
       );
     if (qty != null && qty > 0 && account.equity > 0) {
       const existing = positions.find((p) => sameSymbol(p.symbol, args.ticker));
+      // Unfilled value of queued BUYs; filled shares are already in the position's market value.
       const pending = pendingBuys
         .filter((o) => sameSymbol(o.symbol, args.ticker))
-        // Filled shares are already in the position's market value.
-        .reduce((sum, o) => sum + o.qty - o.filledQty, 0);
-      const value = (existing?.marketValue ?? 0) + (pending + qty) * entry;
+        .reduce(
+          (sum, o) =>
+            sum +
+            (o.notional != null
+              ? Math.max(0, o.notional - o.filledQty * entry)
+              : (o.qty - o.filledQty) * entry),
+          0,
+        );
+      const value = (existing?.marketValue ?? 0) + pending + qty * entry;
       const pct = (value / account.equity) * 100;
       if (pct > maxPositionPct)
         rejected.push(

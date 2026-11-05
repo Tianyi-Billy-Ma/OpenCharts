@@ -89,6 +89,8 @@ export interface Order {
   qty: number;
   /** Already executed; `qty - filledQty` is what is still working. */
   filledQty: number;
+  /** Dollar amount for notional orders, whose `qty` is 0 (Alpaca sends null). */
+  notional: number | null;
   status: string;
   stopPrice: number | null;
   limitPrice: number | null;
@@ -266,6 +268,7 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
     type: String(o.type),
     qty: Number(o.qty),
     filledQty: Number(o.filled_qty ?? 0),
+    notional: o.notional == null ? null : Number(o.notional),
     status: String(o.status),
     stopPrice: o.stop_price == null ? null : Number(o.stop_price),
     limitPrice: o.limit_price == null ? null : Number(o.limit_price),

@@ -23,6 +23,7 @@ const order = (o: Partial<Order>): Order => ({
   type: "market",
   qty: 1,
   filledQty: 0,
+  notional: null,
   status: "accepted",
   stopPrice: null,
   limitPrice: null,
@@ -212,6 +213,17 @@ describe("order desk", () => {
     });
     store.setApproval("NVDA", NOW + DAY * 1000, NOW);
     expect((await desk.place(buy, "trader")).ok).toBe(true);
+  });
+
+  it("reserves the dollar amount of a pending notional BUY", async () => {
+    // $9,000 queued (qty null at Alpaca) + 10 shares at $100 = 10% is fine; 11 shares is not.
+    const { store, desk } = setup({
+      open: [order({ symbol: "NVDA", qty: 0, notional: 9000 })],
+    });
+    store.setApproval("NVDA", NOW + DAY * 1000, NOW);
+    expect((await desk.place(buy, "trader")).ok).toBe(true);
+    const over = await desk.place({ ...buy, qty: 11 }, "trader");
+    expect(over.rejected).toContain("position would be 10.1% of equity (limit 10%)");
   });
 
   it("counts symbols with unfilled BUYs as open positions", async () => {
