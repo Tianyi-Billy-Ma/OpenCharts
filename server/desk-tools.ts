@@ -7,6 +7,7 @@ import {
 import { atr, bollingerBands, macd, rsi, sma, volumeSma } from "../src/lib/indicators.ts";
 import { isCrypto, timeframeSeconds, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
+import { newYorkDate, upcomingEvents } from "./events.ts";
 import type { McpTool } from "./mcp.ts";
 import { addTradingDays, type Store } from "./store.ts";
 
@@ -35,6 +36,8 @@ export async function deskSignalBars(
   symbol: string,
   timeframe: string,
   limit: number,
+  /** Bars count as closed only when they closed by this time. */
+  nowMs = Date.now(),
 ): Promise<{ bars: DeskSignalBar[]; candles: Awaited<ReturnType<MarketData["getBars"]>> }> {
   const seconds = timeframeSeconds(timeframe);
   if (!seconds) throw new Error(`Bad timeframe "${timeframe}"`);
@@ -43,7 +46,7 @@ export async function deskSignalBars(
     timeframe,
     limit: warmUpBars(deps.config) + limit + 1,
   });
-  const candles = closedBars(raw, barCloseSeconds(seconds, !isCrypto(symbol)));
+  const candles = closedBars(raw, barCloseSeconds(seconds, !isCrypto(symbol)), nowMs);
   const bars = deskSignal(candles, deps.config.deskSignal.params);
   return { bars: bars.slice(-limit), candles };
 }
@@ -334,6 +337,40 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
       description: "Open positions on the Alpaca account (paper by default).",
       inputSchema: { type: "object", properties: {} },
       run: async () => marketData.getPositions(),
+    },
+    {
+      name: "list_signals",
+      description:
+        "Desk Signal events the scanner recorded, newest first, with whether the webhook was sent.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          symbol: symbolArg,
+          limit: { type: "number", description: "1 to 200, default 20" },
+        },
+      },
+      run: async (args) =>
+        store
+          .listSignals({
+            symbol: args.symbol == null ? undefined : symbol(args),
+            limit: Math.floor(num(args, "limit", 1, 200) ?? 20),
+          })
+          .map((s) => ({
+            ...s,
+            barTime: new Date(s.barTime * 1000).toISOString(),
+            createdAt: new Date(s.createdAt).toISOString(),
+          })),
+    },
+    {
+      name: "get_events",
+      description:
+        "Upcoming FOMC rate decisions and CPI releases (New York time), from today through the next `days` days.",
+      inputSchema: {
+        type: "object",
+        properties: { days: { type: "number", description: "1 to 400, default 30" } },
+      },
+      run: async (args) =>
+        upcomingEvents(newYorkDate(now()), Math.floor(num(args, "days", 1, 400) ?? 30)),
     },
     {
       name: "list_approvals",

@@ -4,6 +4,7 @@ import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { createDeskTools } from "./desk-tools.ts";
 import { createMcpHandler, type McpToken } from "./mcp.ts";
+import { createScanner } from "./scanner.ts";
 import { openStore } from "./store.ts";
 
 /** `npm run server`: start the backend with opencharts.config.ts and .env. */
@@ -44,11 +45,31 @@ const mcp = tokens.length
   : undefined;
 if (!mcp) console.warn("[opencharts] No MCP token set, so /mcp is off. See .env.example.");
 
+// Webhook URLs can hold tokens, so they live in .env with the signing secret.
+const webhookUrls = (process.env.OPENCHARTS_WEBHOOK_URLS ?? "")
+  .split(",")
+  .map((u) => u.trim())
+  .filter(Boolean);
+const webhookSecret = process.env.OPENCHARTS_WEBHOOK_SECRET ?? "";
+let webhooks: { urls: string[]; secret: string } | null = null;
+if (webhookUrls.length) {
+  const bad = webhookUrls.filter((u) => !URL.canParse(u));
+  if (bad.length)
+    console.warn(`[opencharts] Ignoring webhooks: ${bad.length} URL(s) do not parse.`);
+  else if (webhookSecret.length < 32)
+    console.warn("[opencharts] Webhooks are off: set OPENCHARTS_WEBHOOK_SECRET (32+ characters).");
+  else webhooks = { urls: webhookUrls, secret: webhookSecret };
+}
+const stopScanner = config.scanner.enabled
+  ? createScanner({ config, marketData, store, webhooks }).start()
+  : () => {};
+
 const app = createApp({
   config,
   marketData,
   hasKeys: Boolean(credentials),
   staticDir: "dist",
+  store,
   mcp,
 });
 
@@ -58,6 +79,7 @@ app.server.listen(port, host, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    stopScanner();
     app.close();
     store.close();
     process.exit(0);

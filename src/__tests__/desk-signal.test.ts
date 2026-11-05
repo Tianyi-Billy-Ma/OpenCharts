@@ -53,6 +53,7 @@ describe("closedBars", () => {
     const bars = [{ time: 0 }, { time: DAY }];
     expect(closedBars(bars, DAY, (DAY + 100) * 1000)).toHaveLength(1);
     expect(closedBars(bars, DAY, 2 * DAY * 1000)).toHaveLength(2);
+    expect(closedBars(bars, DAY, DAY * 1000 - 1)).toHaveLength(0);
   });
 
   it("treats a stock day bar as closed at 16:00 New York", () => {

@@ -69,6 +69,7 @@ The backend's routes, all `GET`:
 | `/api/quote?symbol` | Latest bid and ask |
 | `/api/stream` | Server-Sent Events, one `{"type":"tick",...}` per quote |
 | `/api/desk-signal?symbol[&timeframe][&limit]` | Desk Signal per closed bar: trend, BUY/SELL, swing zones, EMAs, RSI, ATR |
+| `/api/signals[?symbol]` | The 50 latest signals the scanner recorded, with webhook status |
 
 ## Desk Signal
 
@@ -110,6 +111,8 @@ are refused.
 | `screen` | any | Filter the watchlist by trend, signal, RSI, price and volume ratio |
 | `get_news` | any | Recent Alpaca news |
 | `get_positions` | any | Open positions on the Alpaca paper account |
+| `list_signals` | any | Signals the scanner recorded, and whether each webhook went out |
+| `get_events` | any | Upcoming FOMC decisions and CPI releases |
 | `list_approvals` | any | Live approvals and when each ends |
 | `set_approval(ticker, until?)` | risk | Approve a watchlist ticker; 5 trading days unless `until` is given; calling again renews |
 | `revoke_approval(ticker)` | risk | End an approval now |
@@ -135,6 +138,51 @@ Example client setup (any MCP client that supports Streamable HTTP and headers):
 To reach it from another machine, publish only `/mcp` through your tunnel on
 its own hostname. The bearer token is its gate, so do not put it behind a
 browser login such as Cloudflare Access.
+
+## Signal scanner and webhooks
+
+While the backend runs, it checks the watchlist every 5 minutes on the
+configured timeframe. A bar counts once it has closed and 10 more minutes have
+passed, so its final values are in: with daily bars, about 16:10 New York for
+stocks and 00:10 UTC for crypto. Each new BUY or SELL is saved once per ticker
+and bar. Change the timing under `scanner` in `opencharts.config.ts`.
+
+A signal on a ticker with a live Risk Officer approval is POSTed to every URL in
+`OPENCHARTS_WEBHOOK_URLS`. Webhooks stay off until `OPENCHARTS_WEBHOOK_SECRET` is set
+(32+ characters). A failed POST is retried 3 times (after 2 s, 10 s and 30 s).
+If it still fails, the failure is logged and shown in `/api/signals` and `list_signals`.
+
+The body is JSON. Its `text` field is the HANDOFF line,
+`TICKER | IDEA | EVIDENCE | NEXT STEP`, for example:
+
+```text
+NVDA | BUY: 1d close broke the 20-bar high | close 145.20 vs 20-bar high 140.10, volume 1.8x its average, RSI 61.2, trend bullish, ATR 3.10 | Trader: if risk allows, GTC bracket order; stop 138.50 (last swing low)
+```
+
+The other fields carry the same numbers (`ticker`, `signal`, `timeframe`,
+`barTime`, `close`, `stop`, ...).
+
+Every POST is signed. Verify it before trusting it:
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verify(req, rawBody, secret) {
+  const ts = req.headers["x-opencharts-timestamp"];
+  const sig = req.headers["x-opencharts-signature"] ?? "";
+  if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false; // too old
+  const want = `sha256=${createHmac("sha256", secret).update(`${ts}.${rawBody}`).digest("hex")}`;
+  return sig.length === want.length && timingSafeEqual(Buffer.from(sig), Buffer.from(want));
+}
+```
+
+`X-OpenCharts-Delivery` (`symbol:timeframe:barTime`) stays the same across
+retries, so receivers can drop duplicates.
+
+## Deploying
+
+See [deploy.md](deploy.md) to run the backend as a systemd service behind
+Cloudflare Tunnel, with the terminal behind Cloudflare Access and `/mcp` on its own hostname.
 
 ## Known limits
 
