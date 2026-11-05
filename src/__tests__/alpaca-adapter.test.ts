@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { mkdtempSync, writeFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -142,6 +142,17 @@ describe("backend routes", () => {
 
   it("answers a malformed path with 400 instead of crashing", async () => {
     expect((await fetch(`${baseUrl}/%`)).status).toBe(400);
+    // fetch normalizes "//%", so send it raw.
+    const raw = await new Promise<string>((resolve, reject) => {
+      const socket = connect((app.server.address() as AddressInfo).port, "127.0.0.1", () => {
+        socket.write("GET //% HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+      });
+      let data = "";
+      socket.on("data", (chunk) => (data += chunk));
+      socket.on("end", () => resolve(data));
+      socket.on("error", reject);
+    });
+    expect(raw).toMatch(/^HTTP\/1\.1 (400|404)/);
     expect((await fetch(`${baseUrl}/api/health`)).status).toBe(200);
   });
 

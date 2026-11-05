@@ -190,7 +190,13 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
   };
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
+    let url: URL;
+    try {
+      // Only the path matters; a fixed origin stops "//host" targets parsing as hosts.
+      url = new URL(`http://localhost${req.url?.startsWith("/") ? req.url : "/"}`);
+    } catch {
+      return sendJson(res, 400, { error: "Bad request URL" });
+    }
     if (req.method !== "GET" && req.method !== "HEAD") {
       return sendJson(res, 405, { error: "Method not allowed" });
     }
@@ -202,7 +208,13 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
       });
       return;
     }
-    serveStatic(url, res);
+    try {
+      serveStatic(url, res);
+    } catch {
+      // Last line of defence: one bad request must never take the server down.
+      if (!res.headersSent) sendJson(res, 500, { error: "Internal error" });
+      else res.end();
+    }
   });
 
   return {
