@@ -72,14 +72,17 @@ export function createGuard(deps: GuardDeps) {
 
   const plannedStop = async (ticker: string, price: number) => {
     // The latest plan: a BUY we placed, or a "plan" row the Trader logged (official-MCP path).
-    const planned = store
-      .listJournal({ ticker, limit: 50 })
-      .find(
+    // Queried by action, so scanner and note rows can never push the plan out of reach.
+    const planned = [
+      ...store.listJournal({ ticker, action: "order", limit: 500 }),
+      ...store.listJournal({ ticker, action: "plan", limit: 1 }),
+    ]
+      .filter(
         (e) =>
           e.stop != null &&
-          ((e.action === "order" && e.reason.startsWith("BUY") && e.outcome.startsWith("placed")) ||
-            e.action === "plan"),
-      )?.stop;
+          (e.action === "plan" || (e.reason.startsWith("BUY") && e.outcome.startsWith("placed"))),
+      )
+      .sort((a, b) => b.time - a.time || b.id - a.id)[0]?.stop;
     if (planned != null && planned < price) return { stop: planned, from: "journal plan" };
     const { bars } = await deskSignalBars(deps, ticker, config.deskSignal.timeframe, 1, now());
     const atr = bars[bars.length - 1]?.atr;

@@ -336,6 +336,15 @@ describe("position guard", () => {
     expect(store.listJournal({ action: "stop" })[0]!.evidence).toBe("stop from journal plan");
   });
 
+  it("still finds the plan after many newer journal rows", async () => {
+    const { store, guard, placed } = guardSetup({ positions: [position({})] });
+    store.addJournal({ agent: "trader", ticker: "NVDA", action: "plan", stop: 93.5 }, NOW);
+    for (let i = 1; i <= 60; i++)
+      store.addJournal({ agent: "scanner", ticker: "NVDA", action: "signal" }, NOW + i);
+    await guard.runOnce();
+    expect(placed[0]).toMatchObject({ qty: "10", stop_price: 93.5 });
+  });
+
   it("falls back to an ATR stop, and uses a stop-limit for crypto", async () => {
     const { guard, placed } = guardSetup({
       positions: [
