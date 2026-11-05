@@ -203,6 +203,25 @@ describe("MCP server", () => {
   });
 });
 
+describe("get_indicators", () => {
+  it("reports RSI and ATR over 14 bars even when Desk Signal uses other periods", async () => {
+    const custom = {
+      ...DEFAULT_CONFIG,
+      deskSignal: {
+        ...DEFAULT_CONFIG.deskSignal,
+        params: { ...DEFAULT_CONFIG.deskSignal.params, rsiPeriod: 2, atrPeriod: 3 },
+      },
+    };
+    const run = (config: typeof DEFAULT_CONFIG) =>
+      createDeskTools({ config, marketData, store, now: () => NOW })
+        .find((t) => t.name === "get_indicators")!
+        .run({ symbol: "NVDA" }) as Promise<{ rsi14: number; atr14: number }>;
+    const [a, b] = await Promise.all([run(DEFAULT_CONFIG), run(custom)]);
+    expect(b.rsi14).toBe(a.rsi14);
+    expect(b.atr14).toBe(a.atr14);
+  });
+});
+
 describe("approvals store", () => {
   it("expires approvals and counts trading days", () => {
     const s = openStore(":memory:");

@@ -4,7 +4,7 @@ import {
   deskSignal,
   type DeskSignalBar,
 } from "../src/lib/desk-signal.ts";
-import { bollingerBands, macd, sma, volumeSma } from "../src/lib/indicators.ts";
+import { atr, bollingerBands, macd, rsi, sma, volumeSma } from "../src/lib/indicators.ts";
 import { isCrypto, timeframeSeconds, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import type { McpTool } from "./mcp.ts";
@@ -202,11 +202,11 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
           ...ema,
           sma20: round(last(sma(candles, 20))?.value),
           sma50: round(last(sma(candles, 50))?.value),
-          rsi14: round(bar.rsi, 2),
+          rsi14: round(last(rsi(candles, 14))?.value, 2),
           macd: round(last(m.macd)?.value),
           macdSignal: round(last(m.signal)?.value),
           macdHistogram: round(last(m.histogram)?.value),
-          atr14: round(bar.atr),
+          atr14: round(last(atr(candles, 14))?.value),
           bollingerUpper: round(last(bb.upper)?.value),
           bollingerMiddle: round(last(bb.middle)?.value),
           bollingerLower: round(last(bb.lower)?.value),
