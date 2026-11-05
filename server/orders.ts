@@ -166,7 +166,7 @@ export function createOrderDesk(deps: OrderDeskDeps) {
           (sum, o) =>
             sum +
             (o.notional != null
-              ? Math.max(0, o.notional - o.filledQty * entry)
+              ? Math.max(0, o.notional - o.filledQty * (o.filledAvgPrice ?? entry))
               : (o.qty - o.filledQty) * entry),
           0,
         );
