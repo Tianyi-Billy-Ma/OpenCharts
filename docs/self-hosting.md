@@ -104,6 +104,11 @@ ATR is in the top 10% of its last 100 values. It only looks at closed bars.
   Alpaca history: long only, entry at the next open, stop at the last swing low,
   exit on SELL, the stop, or after 10 bars. Add `--timeframe 4h`, `--years 5`, or
   `--json`.
+- **Go-live review:** `npm run review` lists every paper trade on the Alpaca
+  account (fills paired from flat to flat) next to a backtest of the watchlist
+  over the same window, on the configured timeframe, and counts trading days
+  since the first fill. Going live needs 60 or more trading days with paper close
+  to the backtest, and the owner's written OK. Add `--timeframe` or `--json`.
 
 ## MCP server for bots
 
