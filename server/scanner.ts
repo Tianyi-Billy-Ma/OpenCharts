@@ -1,7 +1,9 @@
 import { volumeSma } from "../src/lib/indicators.ts";
-import type { MarketData } from "./alpaca.ts";
+import { isCrypto, timeframeSeconds, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import { deskSignalBars } from "./desk-tools.ts";
+import type { DeskSignalBar } from "../src/lib/desk-signal.ts";
+import type { Candle } from "../src/services/schemas.ts";
 import type { SignalRecord, Store } from "./store.ts";
 import { deliverWebhook, type DeliverOptions } from "./webhooks.ts";
 
@@ -41,9 +43,13 @@ export function handoffText(s: Pick<SignalRecord, "symbol" | "timeframe" | "sign
     `trend ${d.trend}`,
     `ATR ${fmt(d.atr as number)}`,
   ].join(", ");
-  const next = buy
-    ? `Trader: if risk allows, GTC bracket order; stop ${fmt(d.stop as number)} (${d.stopFrom})`
-    : "Trader: exit or tighten the stop on any long; no shorts";
+  const stop = `${fmt(d.stop as number)} (${d.stopFrom})`;
+  // Alpaca has no bracket orders for crypto: enter, then place a separate stop-limit.
+  const next = !buy
+    ? "Trader: exit or tighten the stop on any long; no shorts"
+    : isCrypto(s.symbol)
+      ? `Trader: if risk allows, buy now, then a separate stop-limit sell at ${stop}`
+      : `Trader: if risk allows, GTC bracket order; stop ${stop}`;
   return `${s.symbol} | ${idea} | ${evidence} | ${next}`;
 }
 
@@ -76,6 +82,46 @@ export function createScanner(deps: ScannerDeps) {
       log(`webhook to ${r.host} failed after ${r.attempts} tries: ${r.error}`);
   };
 
+  // Bars that can settle between two passes; more than one when bars are shorter than the interval.
+  const barSeconds = timeframeSeconds(timeframe) ?? 86_400;
+  const everySeconds = config.scanner.everyMinutes * 60;
+  const recent =
+    barSeconds >= everySeconds ? 1 : Math.min(50, Math.ceil(everySeconds / barSeconds) + 1);
+
+  /** Save a signal bar once. Returns null when it was already saved. */
+  const record = (symbol: string, bar: DeskSignalBar, history: Candle[], at: number) => {
+    const buy = bar.signal === "BUY";
+    const prior = history.slice(-1 - params.breakoutLookback, -1);
+    const avgVol = volumeSma(history.slice(0, -1), params.volumeLookback).at(-1)?.value;
+    const swingStop = bar.swingLow != null && bar.swingLow < bar.close;
+    const detail = {
+      close: bar.close,
+      breakoutLookback: params.breakoutLookback,
+      breakoutLevel: buy
+        ? Math.max(...prior.map((c) => c.high))
+        : Math.min(...prior.map((c) => c.low)),
+      volumeRatio: avgVol ? (history.at(-1)?.volume ?? 0) / avgVol : null,
+      rsi: bar.rsi,
+      atr: bar.atr,
+      trend: bar.trend,
+      swingHigh: bar.swingHigh,
+      swingLow: bar.swingLow,
+      // Same stop rule as the backtest.
+      stop: swingStop ? bar.swingLow : bar.atr != null ? bar.close - 2 * bar.atr : null,
+      stopFrom: swingStop ? "last swing low" : "2x ATR",
+    };
+    // Checked now, not at the pass start: an earlier webhook's retries can take minutes.
+    const approved = store.isApproved(symbol, now());
+    const webhook = !webhooks ? "no webhooks" : approved ? "pending" : "not approved";
+    const saved = store.recordSignal(
+      { symbol, timeframe, barTime: bar.time, signal: bar.signal!, detail, webhook },
+      at,
+    );
+    if (saved)
+      log(`${symbol} ${bar.signal} on ${new Date(bar.time * 1000).toISOString()} (${webhook})`);
+    return saved;
+  };
+
   /** One pass over the watchlist. Returns the signals that are new. */
   const scanOnce = async (): Promise<SignalRecord[]> => {
     const at = now();
@@ -83,42 +129,18 @@ export function createScanner(deps: ScannerDeps) {
     const found: SignalRecord[] = [];
     for (const symbol of symbols) {
       try {
-        const { bars, candles } = await deskSignalBars(deps, symbol, timeframe, 1, settled);
+        const { bars, candles } = await deskSignalBars(deps, symbol, timeframe, recent, settled);
         lastError.delete(symbol);
-        const bar = bars[bars.length - 1];
-        if (!bar?.signal) continue;
-        const buy = bar.signal === "BUY";
-        const prior = candles.slice(-1 - params.breakoutLookback, -1);
-        const avgVol = volumeSma(candles.slice(0, -1), params.volumeLookback).at(-1)?.value;
-        const swingStop = bar.swingLow != null && bar.swingLow < bar.close;
-        const detail = {
-          close: bar.close,
-          breakoutLookback: params.breakoutLookback,
-          breakoutLevel: buy
-            ? Math.max(...prior.map((c) => c.high))
-            : Math.min(...prior.map((c) => c.low)),
-          volumeRatio: avgVol ? (candles.at(-1)?.volume ?? 0) / avgVol : null,
-          rsi: bar.rsi,
-          atr: bar.atr,
-          trend: bar.trend,
-          swingHigh: bar.swingHigh,
-          swingLow: bar.swingLow,
-          // Same stop rule as the backtest.
-          stop: swingStop ? bar.swingLow : bar.atr != null ? bar.close - 2 * bar.atr : null,
-          stopFrom: swingStop ? "last swing low" : "2x ATR",
-        };
-        // Checked now, not at the pass start: an earlier webhook's retries can take minutes.
-        const approved = store.isApproved(symbol, now());
-        const webhook = !webhooks ? "no webhooks" : approved ? "pending" : "not approved";
-        const saved = store.recordSignal(
-          { symbol, timeframe, barTime: bar.time, signal: bar.signal, detail, webhook },
-          at,
-        );
-        if (!saved) continue; // already seen this bar
-        log(`${symbol} ${bar.signal} on ${new Date(bar.time * 1000).toISOString()} (${webhook})`);
-        found.push(saved);
-        // shortcut: a crash mid-send leaves the signal "pending" and it is not resent; resend on start if that matters.
-        if (webhook === "pending") await send(saved);
+        for (let k = 0; k < bars.length; k++) {
+          const bar = bars[k]!;
+          if (!bar.signal) continue;
+          // This bar and the candles before it, for the evidence.
+          const history = candles.slice(0, candles.length - bars.length + k + 1);
+          const saved = record(symbol, bar, history, at);
+          // shortcut: a crash mid-send leaves the signal "pending" and it is not resent; resend on start if that matters.
+          if (saved?.webhook === "pending") await send(saved);
+          if (saved) found.push(saved);
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (lastError.get(symbol) !== message) log(`${symbol}: ${message}`);

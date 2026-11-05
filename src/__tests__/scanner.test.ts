@@ -102,11 +102,31 @@ describe("signal scanner", () => {
     expect(payload.ticker).toBe("BTC/USD");
     expect(payload.text.split(" | ")).toHaveLength(4);
     expect(payload.text).toMatch(/^BTC\/USD \| BUY: 1d close broke the 20-bar high \| /);
+    expect(payload.text).toContain("then a separate stop-limit sell"); // no crypto brackets
 
     const saved = store.listSignals()[0]!;
     expect(saved.webhook).toBe("sent");
     expect(saved.deliveries).toEqual([{ host: "hooks.example.com", ok: true, attempts: 3 }]);
     expect(JSON.stringify(saved)).not.toContain("token=abc");
+  });
+
+  it("catches a signal on any bar that settled since the last pass", async () => {
+    // 1-minute bars with a 5-minute pass: the BUY is three bars back.
+    const series = bars();
+    const base = series[series.length - 2]!;
+    const later = [1, 2, 3].map((k) => ({ ...base, time: TODAY - DAY + k * 60, volume: 1000 }));
+    const all = [...series, ...later];
+    const store = openStore(":memory:");
+    const scanner = createScanner({
+      config: { ...config, deskSignal: { ...config.deskSignal, timeframe: "1m" } },
+      marketData: { getBars: async ({ limit = 500 }) => all.slice(-limit) } as MarketData,
+      store,
+      webhooks: null,
+      now: () => (TODAY + 20 * 60) * 1000,
+      log: () => {},
+    });
+    const found = await scanner.scanOnce();
+    expect(found.map((f) => [f.signal, f.barTime])).toEqual([["BUY", TODAY - DAY]]);
   });
 
   it("checks the approval when the signal is found, not when the pass started", async () => {
