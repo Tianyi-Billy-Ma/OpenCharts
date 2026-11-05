@@ -59,7 +59,7 @@
     "dev:ci": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build",
     "build:desk": "VITE_ADAPTER=alpaca vite build",
-    "server": "node --env-file-if-exists=.env server/main.ts",
+    "server": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/main.ts",
     "backtest": "node --env-file-if-exists=.env server/backtest-cli.ts",
     "check:size": "node scripts/check-bundle-size.mjs",
     "build:lib": "vite build --config vite.lib.config.ts && node scripts/build-lib-css.mjs",

@@ -136,6 +136,8 @@ function fakeMarketData(): MarketData {
       }, 50);
       return () => clearInterval(id);
     },
+    getNews: async () => [],
+    getPositions: async () => [],
   };
 }
 

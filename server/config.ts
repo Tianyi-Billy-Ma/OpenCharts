@@ -22,6 +22,12 @@ export interface OpenChartsConfig {
     timeframe: string;
     params: DeskSignalParams;
   };
+  approvals: {
+    /** How long a Risk Officer approval lasts when no end date is given. Stocks skip weekends. */
+    tradingDays: number;
+  };
+  /** SQLite file for approvals and (later) signals and the journal. */
+  dataPath: string;
 }
 
 export const DEFAULT_CONFIG: OpenChartsConfig = {
@@ -32,6 +38,8 @@ export const DEFAULT_CONFIG: OpenChartsConfig = {
     crypto: ["BTC/USD", "ETH/USD", "SOL/USD"],
   },
   deskSignal: { timeframe: "1d", params: DEFAULT_DESK_SIGNAL_PARAMS },
+  approvals: { tradingDays: 5 },
+  dataPath: "data/opencharts.db",
 };
 
 /** Load `opencharts.config.ts` (or the path in OPENCHARTS_CONFIG) over the defaults. */
@@ -46,6 +54,7 @@ export async function loadConfig(path = process.env.OPENCHARTS_CONFIG): Promise<
     ...DEFAULT_CONFIG,
     ...user,
     watchlist: { ...DEFAULT_CONFIG.watchlist, ...user.watchlist },
+    approvals: { ...DEFAULT_CONFIG.approvals, ...user.approvals },
     deskSignal: {
       timeframe: user.deskSignal?.timeframe ?? DEFAULT_CONFIG.deskSignal.timeframe,
       params: { ...DEFAULT_CONFIG.deskSignal.params, ...user.deskSignal?.params },

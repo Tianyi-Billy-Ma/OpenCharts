@@ -2,9 +2,9 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { Symbol } from "../src/services/schemas.ts";
-import { barCloseSeconds, closedBars, deskSignal } from "../src/lib/desk-signal.ts";
-import { isCrypto, timeframeSeconds, type AlpacaQuote, type MarketData } from "./alpaca.ts";
+import { isCrypto, type AlpacaQuote, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
+import { deskSignalBars } from "./desk-tools.ts";
 
 /**
  * The OpenCharts backend's HTTP surface. The browser talks only to this; the
@@ -16,6 +16,7 @@ import type { OpenChartsConfig } from "./config.ts";
  *   GET /api/quote?symbol
  *   GET /api/stream                  Server-Sent Events: {"type":"tick",...}
  *   GET /api/desk-signal?symbol[&timeframe][&limit]   Desk Signal on closed bars, newest last
+ *   POST /mcp                        MCP server for the desk's bots (see mcp.ts), when tokens are set
  *
  * Anything else is served from the built frontend in `dist/`.
  */
@@ -26,6 +27,8 @@ export interface AppOptions {
   hasKeys: boolean;
   /** Built frontend to serve. Skipped when the folder is missing. */
   staticDir?: string;
+  /** Handles POST /mcp. Unset: /mcp answers 404. */
+  mcp?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 }
 
 const TIMEFRAMES = new Set(["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]);
@@ -164,24 +167,15 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
         const timeframe = url.searchParams.get("timeframe") ?? config.deskSignal.timeframe;
         const limit = optionalNumber(url.searchParams.get("limit")) ?? 100;
         if (!alpacaSymbol) return sendJson(res, 404, { error: `Unknown symbol "${symbolParam}"` });
-        const seconds = timeframeSeconds(timeframe);
-        if (!seconds) return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
-        if (limit === null || limit < 1)
-          return sendJson(res, 400, { error: "limit must be a positive number" });
-        // EMA 200 and the 100-bar ATR rank need history before the bars returned.
-        const warmUp =
-          Math.max(...config.deskSignal.params.emaPeriods) + config.deskSignal.params.atrLookback;
-        const bars = await marketData.getBars({
-          symbol: alpacaSymbol,
-          timeframe,
-          limit: warmUp + Math.floor(limit) + 1,
-        });
-        const closeAfter = barCloseSeconds(seconds, !isCrypto(alpacaSymbol));
-        const result = deskSignal(closedBars(bars, closeAfter), config.deskSignal.params);
+        if (!TIMEFRAMES.has(timeframe))
+          return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
+        if (limit === null || limit < 1 || limit > 5000)
+          return sendJson(res, 400, { error: "limit must be a number from 1 to 5000" });
+        const { bars } = await deskSignalBars(options, alpacaSymbol, timeframe, Math.floor(limit));
         return sendJson(res, 200, {
           symbol: symbolParam,
           timeframe,
-          bars: result.slice(-Math.floor(limit)),
+          bars,
         });
       }
 
@@ -232,6 +226,14 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
       url = new URL(`http://localhost${req.url?.startsWith("/") ? req.url : "/"}`);
     } catch {
       return sendJson(res, 400, { error: "Bad request URL" });
+    }
+    if (url.pathname === "/mcp" && options.mcp) {
+      options.mcp(req, res).catch((err: unknown) => {
+        console.error("[mcp]", err);
+        if (!res.headersSent) sendJson(res, 500, { error: "Internal error" });
+        else res.end();
+      });
+      return;
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
       return sendJson(res, 405, { error: "Method not allowed" });
