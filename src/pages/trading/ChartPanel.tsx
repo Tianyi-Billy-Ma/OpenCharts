@@ -1417,7 +1417,7 @@ export function ChartPanel({
     [onAddDrawing, pipDigits, timeframe, selectedSymbol],
   );
 
-  useIndicators(chartRef, candleSeriesRef, chartData, activeIndicators, isDark);
+  useIndicators(chartRef, candleSeriesRef, chartData, activeIndicators, isDark, volumeData, timeframe);
 
   // ── Replay trade event markers ─────────────────────────────
   useEffect(() => {

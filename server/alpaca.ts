@@ -53,6 +53,9 @@ const TIMEFRAMES: Record<string, { alpaca: string; seconds: number }> = {
   "1w": { alpaca: "1Week", seconds: 604_800 },
 };
 
+/** Bar length in seconds, or undefined for an unknown timeframe. */
+export const timeframeSeconds = (timeframe: string) => TIMEFRAMES[timeframe]?.seconds;
+
 const DEFAULT_LIMIT = 500;
 /** Total bars per request; also Alpaca's per-page maximum. */
 export const MAX_LIMIT = 10_000;
@@ -179,12 +182,16 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
       }
       // Newest-first requests keep the newest `wanted` bars; windowed ones the oldest.
       candles.sort((a, b) => a.time - b.time);
-      return url.searchParams.get("sort") === "desc" ? candles.slice(-wanted) : candles.slice(0, wanted);
+      return url.searchParams.get("sort") === "desc"
+        ? candles.slice(-wanted)
+        : candles.slice(0, wanted);
     },
 
     async getQuote(symbol) {
       const url = isCrypto(symbol)
-        ? new URL(`${DATA_BASE}/v1beta3/crypto/us/latest/quotes?symbols=${encodeURIComponent(symbol)}`)
+        ? new URL(
+            `${DATA_BASE}/v1beta3/crypto/us/latest/quotes?symbols=${encodeURIComponent(symbol)}`,
+          )
         : new URL(`${DATA_BASE}/v2/stocks/${encodeURIComponent(symbol)}/quotes/latest?feed=iex`);
       const body = (await getJson(url)) as {
         quote?: { bp: number; ap: number; t: string };

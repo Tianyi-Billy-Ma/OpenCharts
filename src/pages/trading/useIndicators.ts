@@ -1,6 +1,14 @@
 import { useEffect, useRef } from "react";
-import type { IChartApi, ISeriesApi, CandlestickData, Time } from "lightweight-charts";
-import { LineStyle } from "lightweight-charts";
+import type {
+  IChartApi,
+  ISeriesApi,
+  CandlestickData,
+  HistogramData,
+  SeriesMarker,
+  Time,
+} from "lightweight-charts";
+import { LineStyle, LineType } from "lightweight-charts";
+import { closedBars, deskSignal } from "../../lib/desk-signal.ts";
 import {
   sma,
   ema,
@@ -14,7 +22,10 @@ import {
   type IndicatorType,
 } from "../../lib/indicators.ts";
 import { toIndicatorCandles } from "./utils.ts";
-import { CHART_COLORS } from "./constants.ts";
+import { CHART_COLORS, TF_INTERVAL_MS } from "./constants.ts";
+import type { Timeframe } from "./constants.ts";
+
+const DESK_EMA_COLORS = ["#26a69a", "#42a5f5", "#ffa726", "#ef5350"];
 
 export function useIndicators(
   chartRef: React.RefObject<IChartApi | null>,
@@ -22,6 +33,8 @@ export function useIndicators(
   chartData: CandlestickData<Time>[],
   activeIndicators: IndicatorType[],
   isDark: boolean,
+  volumeData: HistogramData<Time>[] = [],
+  timeframe?: Timeframe,
 ): void {
   const indicatorSeriesRef = useRef<Map<string, ISeriesApi<"Line"> | ISeriesApi<"Histogram">>>(
     new Map(),
@@ -32,7 +45,7 @@ export function useIndicators(
     if (!chartRef.current || !candleSeriesRef.current || chartData.length === 0) return;
 
     const chart = chartRef.current;
-    const indCandles = toIndicatorCandles(chartData);
+    const indCandles = toIndicatorCandles(chartData, volumeData);
 
     // Remove old indicator series
     for (const [_key, series] of indicatorSeriesRef.current) {
@@ -196,9 +209,75 @@ export function useIndicators(
           indicatorSeriesRef.current.set("VWAP", s);
           break;
         }
+        case "DESK": {
+          // Same code as the backend scanner, on closed bars only.
+          // shortcut: uses the default rules, not opencharts.config.ts; read them from the backend if users customise.
+          const barMs = timeframe ? TF_INTERVAL_MS[timeframe] : 0;
+          const bars = deskSignal(barMs ? closedBars(indCandles, barMs / 1000) : indCandles);
+          const emaLines = DESK_EMA_COLORS.map((color, k) => {
+            const line = chart.addLineSeries({
+              color,
+              lineWidth: 1,
+              priceScaleId: "right",
+              lastValueVisible: false,
+              priceLineVisible: false,
+            });
+            line.setData(
+              bars.flatMap((b) =>
+                b.emas[k] == null ? [] : [{ time: b.time as Time, value: b.emas[k]! }],
+              ),
+            );
+            indicatorSeriesRef.current.set(`DESK-ema${k}`, line);
+            return line;
+          });
+          for (const [key, pick, color] of [
+            ["DESK-swingHigh", (b: (typeof bars)[number]) => b.swingHigh, colors.down],
+            ["DESK-swingLow", (b: (typeof bars)[number]) => b.swingLow, colors.up],
+          ] as const) {
+            const zone = chart.addLineSeries({
+              color: color + "99",
+              lineWidth: 1,
+              lineStyle: LineStyle.Dotted,
+              lineType: LineType.WithSteps,
+              priceScaleId: "right",
+              lastValueVisible: false,
+              priceLineVisible: false,
+            });
+            zone.setData(
+              bars.flatMap((b) =>
+                pick(b) == null ? [] : [{ time: b.time as Time, value: pick(b)! }],
+              ),
+            );
+            indicatorSeriesRef.current.set(key, zone);
+          }
+          // Markers ride on the fastest EMA line so they never clash with the
+          // candle series' own markers (replay trade events).
+          const markers: SeriesMarker<Time>[] = [];
+          for (const b of bars) {
+            if (b.signal === "BUY") {
+              markers.push({
+                time: b.time as Time,
+                position: "belowBar",
+                color: colors.up,
+                shape: "arrowUp",
+                text: "BUY",
+              });
+            } else if (b.signal === "SELL") {
+              markers.push({
+                time: b.time as Time,
+                position: "aboveBar",
+                color: colors.down,
+                shape: "arrowDown",
+                text: "SELL",
+              });
+            }
+          }
+          emaLines[0]!.setMarkers(markers);
+          break;
+        }
       }
     }
     // chartRef/candleSeriesRef are stable refs; colors derived from isDark dep.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeIndicators, chartData, isDark]);
+  }, [activeIndicators, chartData, volumeData, isDark, timeframe]);
 }

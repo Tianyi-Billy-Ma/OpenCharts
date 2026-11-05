@@ -4,7 +4,12 @@ import { connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildBarsUrl, createAlpacaClient, parseBars, type MarketData } from "../../server/alpaca.ts";
+import {
+  buildBarsUrl,
+  createAlpacaClient,
+  parseBars,
+  type MarketData,
+} from "../../server/alpaca.ts";
 import { createApp } from "../../server/app.ts";
 import { DEFAULT_CONFIG } from "../../server/config.ts";
 import { createAlpacaAdapter, parseSseChunk } from "../adapter/alpaca.ts";
@@ -36,7 +41,9 @@ describe("buildBarsUrl", () => {
   });
 
   it("caps the limit and rejects unknown timeframes", () => {
-    expect(buildBarsUrl({ symbol: "NVDA", timeframe: "1d", limit: 50_000 })!.searchParams.get("limit")).toBe("10000");
+    expect(
+      buildBarsUrl({ symbol: "NVDA", timeframe: "1d", limit: 50_000 })!.searchParams.get("limit"),
+    ).toBe("10000");
     expect(buildBarsUrl({ symbol: "NVDA", timeframe: "2d" })).toBeNull();
   });
 });
@@ -61,7 +68,14 @@ describe("parseBars", () => {
 
 describe("getBars paging", () => {
   it("follows next_page_token until the requested count is reached", async () => {
-    const bar = (i: number) => ({ t: new Date(NOW - i * 60_000).toISOString(), o: 1, h: 1, l: 1, c: 1, v: 1 });
+    const bar = (i: number) => ({
+      t: new Date(NOW - i * 60_000).toISOString(),
+      o: 1,
+      h: 1,
+      l: 1,
+      c: 1,
+      v: 1,
+    });
     const pages = [
       { bars: { "BTC/USD": [bar(1), bar(2)] }, next_page_token: "p2" },
       { bars: { "BTC/USD": [bar(3)] }, next_page_token: "p3" },
@@ -72,9 +86,15 @@ describe("getBars paging", () => {
       return new Response(JSON.stringify(pages[seen.length - 1]));
     }) as unknown as typeof fetch;
 
-    const candles = await createAlpacaClient({ fetchImpl }).getBars({ symbol: "BTC/USD", timeframe: "1m", limit: 3 });
+    const candles = await createAlpacaClient({ fetchImpl }).getBars({
+      symbol: "BTC/USD",
+      timeframe: "1m",
+      limit: 3,
+    });
     expect(candles).toHaveLength(3);
-    expect(candles.map((c) => c.time)).toEqual([...candles.map((c) => c.time)].sort((a, b) => a - b));
+    expect(candles.map((c) => c.time)).toEqual(
+      [...candles.map((c) => c.time)].sort((a, b) => a - b),
+    );
     expect(seen).toEqual(["null:3", "p2:3"]);
   });
 });
@@ -92,12 +112,20 @@ function fakeMarketData(): MarketData {
   const end = Math.floor(Date.now() / 3_600_000) * 3_600;
   const all: Candle[] = Array.from({ length: 720 }, (_, i) => {
     const close = 100 + Math.sin(i / 10) * 5;
-    return { time: end - (720 - i) * 3_600, open: close, high: close + 1, low: close - 1, close, volume: 1 };
+    return {
+      time: end - (720 - i) * 3_600,
+      open: close,
+      high: close + 1,
+      low: close - 1,
+      close,
+      volume: 1,
+    };
   });
   return {
     getBars: async ({ limit = 500, fromMs, toMs }) => {
       const inWindow = all.filter(
-        (c) => (fromMs == null || c.time * 1000 >= fromMs) && (toMs == null || c.time * 1000 < toMs),
+        (c) =>
+          (fromMs == null || c.time * 1000 >= fromMs) && (toMs == null || c.time * 1000 < toMs),
       );
       return fromMs != null ? inWindow.slice(0, limit) : inWindow.slice(-limit);
     },
@@ -114,7 +142,12 @@ function fakeMarketData(): MarketData {
 let baseUrl = "";
 const staticDir = mkdtempSync(join(tmpdir(), "oc-static-"));
 writeFileSync(join(staticDir, "index.html"), "<!doctype html><title>ok</title>");
-const app = createApp({ config: DEFAULT_CONFIG, marketData: fakeMarketData(), hasKeys: true, staticDir });
+const app = createApp({
+  config: DEFAULT_CONFIG,
+  marketData: fakeMarketData(),
+  hasKeys: true,
+  staticDir,
+});
 
 beforeAll(async () => {
   await new Promise<void>((resolve) => app.server.listen(0, "127.0.0.1", resolve));
@@ -124,7 +157,9 @@ afterAll(() => app.close());
 
 describe("backend routes", () => {
   it("maps crypto pairs to terminal names and rejects unknown symbols", async () => {
-    const symbols = (await (await fetch(`${baseUrl}/api/symbols`)).json()) as Array<{ name: string }>;
+    const symbols = (await (await fetch(`${baseUrl}/api/symbols`)).json()) as Array<{
+      name: string;
+    }>;
     expect(symbols.map((s) => s.name)).toContain("BTCUSD");
     expect(symbols.map((s) => s.name)).toContain("NVDA");
 
@@ -132,6 +167,16 @@ describe("backend routes", () => {
     expect(unknown.status).toBe(404);
     const badNumber = await fetch(`${baseUrl}/api/candles?symbol=NVDA&timeframe=1h&limit=abc`);
     expect(badNumber.status).toBe(400);
+  });
+
+  it("serves Desk Signal on closed bars", async () => {
+    const res = await fetch(`${baseUrl}/api/desk-signal?symbol=NVDA&timeframe=1h&limit=5`);
+    const body = (await res.json()) as { bars: Array<{ time: number; trend: string }> };
+    expect(res.status).toBe(200);
+    expect(body.bars).toHaveLength(5);
+    expect(body.bars[4]!.time * 1000 + 3_600_000).toBeLessThanOrEqual(Date.now());
+    expect(["bullish", "bearish", "neutral"]).toContain(body.bars[0]!.trend);
+    expect((await fetch(`${baseUrl}/api/desk-signal?symbol=NVDA&timeframe=2h`)).status).toBe(400);
   });
 
   it("serves the frontend, with index.html as the fallback route", async () => {
@@ -162,8 +207,12 @@ describe("backend routes", () => {
   });
 });
 
-runAdapterConformance("alpaca (via backend, fake upstream)", () => createAlpacaAdapter({ baseUrl }), {
-  symbol: "NVDA",
-  timeframe: "1h",
-  tickTimeoutMs: 2_000,
-});
+runAdapterConformance(
+  "alpaca (via backend, fake upstream)",
+  () => createAlpacaAdapter({ baseUrl }),
+  {
+    symbol: "NVDA",
+    timeframe: "1h",
+    tickTimeoutMs: 2_000,
+  },
+);

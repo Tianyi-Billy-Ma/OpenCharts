@@ -2,7 +2,8 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { Symbol } from "../src/services/schemas.ts";
-import { isCrypto, type AlpacaQuote, type MarketData } from "./alpaca.ts";
+import { closedBars, deskSignal } from "../src/lib/desk-signal.ts";
+import { isCrypto, timeframeSeconds, type AlpacaQuote, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 
 /**
@@ -14,6 +15,7 @@ import type { OpenChartsConfig } from "./config.ts";
  *   GET /api/candles?symbol&timeframe[&limit][&fromMs][&toMs]
  *   GET /api/quote?symbol
  *   GET /api/stream                  Server-Sent Events: {"type":"tick",...}
+ *   GET /api/desk-signal?symbol[&timeframe][&limit]   Desk Signal on closed bars, newest last
  *
  * Anything else is served from the built frontend in `dist/`.
  */
@@ -117,7 +119,8 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
     for (const res of clients) res.write(": ping\n\n");
   }, HEARTBEAT_MS);
 
-  const staticDir = options.staticDir && existsSync(options.staticDir) ? resolve(options.staticDir) : null;
+  const staticDir =
+    options.staticDir && existsSync(options.staticDir) ? resolve(options.staticDir) : null;
 
   const handleApi = async (url: URL, req: IncomingMessage, res: ServerResponse) => {
     const symbolParam = url.searchParams.get("symbol") ?? "";
@@ -133,14 +136,21 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
       case "/api/candles": {
         const timeframe = url.searchParams.get("timeframe") ?? "";
         if (!alpacaSymbol) return sendJson(res, 404, { error: `Unknown symbol "${symbolParam}"` });
-        if (!TIMEFRAMES.has(timeframe)) return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
+        if (!TIMEFRAMES.has(timeframe))
+          return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
         const limit = optionalNumber(url.searchParams.get("limit"));
         const fromMs = optionalNumber(url.searchParams.get("fromMs"));
         const toMs = optionalNumber(url.searchParams.get("toMs"));
         if (limit === null || fromMs === null || toMs === null) {
           return sendJson(res, 400, { error: "limit, fromMs and toMs must be numbers" });
         }
-        const candles = await marketData.getBars({ symbol: alpacaSymbol, timeframe, limit, fromMs, toMs });
+        const candles = await marketData.getBars({
+          symbol: alpacaSymbol,
+          timeframe,
+          limit,
+          fromMs,
+          toMs,
+        });
         return sendJson(res, 200, candles);
       }
 
@@ -148,6 +158,30 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
         if (!alpacaSymbol) return sendJson(res, 404, { error: `Unknown symbol "${symbolParam}"` });
         const quote = await marketData.getQuote(alpacaSymbol);
         return sendJson(res, 200, quote && { ...quote, symbol: symbolParam });
+      }
+
+      case "/api/desk-signal": {
+        const timeframe = url.searchParams.get("timeframe") ?? config.deskSignal.timeframe;
+        const limit = optionalNumber(url.searchParams.get("limit")) ?? 100;
+        if (!alpacaSymbol) return sendJson(res, 404, { error: `Unknown symbol "${symbolParam}"` });
+        const seconds = timeframeSeconds(timeframe);
+        if (!seconds) return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
+        if (limit === null || limit < 1)
+          return sendJson(res, 400, { error: "limit must be a positive number" });
+        // EMA 200 and the 100-bar ATR rank need history before the bars returned.
+        const warmUp =
+          Math.max(...config.deskSignal.params.emaPeriods) + config.deskSignal.params.atrLookback;
+        const bars = await marketData.getBars({
+          symbol: alpacaSymbol,
+          timeframe,
+          limit: warmUp + Math.floor(limit) + 1,
+        });
+        const result = deskSignal(closedBars(bars, seconds), config.deskSignal.params);
+        return sendJson(res, 200, {
+          symbol: symbolParam,
+          timeframe,
+          bars: result.slice(-Math.floor(limit)),
+        });
       }
 
       case "/api/stream": {
@@ -170,7 +204,8 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
   };
 
   const serveStatic = (url: URL, res: ServerResponse) => {
-    if (!staticDir) return sendJson(res, 404, { error: "Frontend not built. Run `npm run build:desk`." });
+    if (!staticDir)
+      return sendJson(res, 404, { error: "Frontend not built. Run `npm run build:desk`." });
     // normalize + prefix check keeps requests inside dist/.
     let pathname: string;
     try {

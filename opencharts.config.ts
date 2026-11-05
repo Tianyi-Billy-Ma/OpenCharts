@@ -1,5 +1,3 @@
-import type { OpenChartsConfig } from "./server/config.ts";
-
 /**
  * Your OpenCharts settings. Edit freely; anything left out uses the defaults
  * in server/config.ts. API keys go in `.env`, never here.
@@ -15,4 +13,10 @@ export default {
     stocks: ["NVDA", "MSFT", "GOOGL", "AMZN", "META", "AMD", "AVGO", "TSM", "PLTR"],
     crypto: ["BTC/USD", "ETH/USD", "SOL/USD"],
   },
-} satisfies Partial<OpenChartsConfig>;
+  deskSignal: {
+    // Bar size for Desk Signal. It only ever looks at closed bars.
+    timeframe: "1d",
+    // Uncomment to override any rule; see src/lib/desk-signal.ts for all of them.
+    // params: { volumeMultiple: 1.5, rsiThreshold: 50, atrMaxPercentile: 0.9 },
+  },
+};

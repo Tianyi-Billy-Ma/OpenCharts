@@ -11,6 +11,7 @@ WORKDIR /app
 ENV NODE_ENV=production HOST=0.0.0.0
 COPY --from=build /app/dist ./dist
 COPY server ./server
+COPY src/lib ./src/lib
 COPY opencharts.config.ts package.json ./
 USER node
 EXPOSE 8787
