@@ -22,6 +22,7 @@ const order = (o: Partial<Order>): Order => ({
   side: "buy",
   type: "market",
   qty: 1,
+  filledQty: 0,
   status: "accepted",
   stopPrice: null,
   limitPrice: null,
@@ -203,6 +204,16 @@ describe("order desk", () => {
     expect(placed).toHaveLength(1);
   });
 
+  it("reserves only the unfilled part of a partly filled BUY", async () => {
+    // 60 of 80 filled (in the position), 20 still working, 10 more: 9% of equity.
+    const { store, desk } = setup({
+      positions: [position({ qty: 60, marketValue: 6000 })],
+      open: [order({ symbol: "NVDA", qty: 80, filledQty: 60 })],
+    });
+    store.setApproval("NVDA", NOW + DAY * 1000, NOW);
+    expect((await desk.place(buy, "trader")).ok).toBe(true);
+  });
+
   it("counts symbols with unfilled BUYs as open positions", async () => {
     const open = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"].map((symbol) => order({ symbol }));
     const { store, desk } = setup({ open });
@@ -295,6 +306,17 @@ describe("position guard", () => {
     });
     await guard.runOnce();
     expect(placed[0]).toMatchObject({ qty: "6", type: "stop" });
+  });
+
+  it("counts only the unsold part of a partly executed stop", async () => {
+    const { guard, placed } = guardSetup({
+      positions: [position({ qty: 10 })],
+      open: [
+        order({ side: "sell", type: "stop", qty: 14, filledQty: 8, status: "partially_filled" }),
+      ],
+    });
+    await guard.runOnce();
+    expect(placed[0]).toMatchObject({ qty: "4", type: "stop" });
   });
 
   it("places a missing stop from the journal's plan", async () => {

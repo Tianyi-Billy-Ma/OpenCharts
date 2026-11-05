@@ -137,7 +137,8 @@ export function createOrderDesk(deps: OrderDeskDeps) {
       const existing = positions.find((p) => sameSymbol(p.symbol, args.ticker));
       const pending = pendingBuys
         .filter((o) => sameSymbol(o.symbol, args.ticker))
-        .reduce((sum, o) => sum + o.qty, 0);
+        // Filled shares are already in the position's market value.
+        .reduce((sum, o) => sum + o.qty - o.filledQty, 0);
       const value = (existing?.marketValue ?? 0) + (pending + qty) * entry;
       const pct = (value / account.equity) * 100;
       if (pct > maxPositionPct)

@@ -160,7 +160,8 @@ export function createGuard(deps: GuardDeps) {
       }
       const covered = stops
         .filter((o) => sameSymbol(o.symbol, position.symbol))
-        .reduce((sum, o) => sum + o.qty, 0);
+        // A partly executed stop only protects what it has not sold yet.
+        .reduce((sum, o) => sum + o.qty - o.filledQty, 0);
       if (covered >= position.qty) {
         failures.delete(ticker);
         continue;
