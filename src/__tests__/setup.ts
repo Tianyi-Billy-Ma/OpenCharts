@@ -31,7 +31,8 @@ class MemoryStorage implements Storage {
   }
 }
 
-for (const name of ["localStorage", "sessionStorage"] as const) {
+// Server tests opt into the node environment, where there is no window.
+for (const name of typeof window === "undefined" ? [] : (["localStorage", "sessionStorage"] as const)) {
   Object.defineProperty(window, name, {
     value: new MemoryStorage(),
     configurable: true,

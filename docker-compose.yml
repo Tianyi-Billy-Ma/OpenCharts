@@ -1,0 +1,10 @@
+services:
+  opencharts:
+    build: .
+    env_file: .env
+    ports:
+      # Localhost only. Put an auth gate (e.g. Cloudflare Access) in front before exposing it.
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./opencharts.config.ts:/app/opencharts.config.ts:ro
+    restart: unless-stopped
