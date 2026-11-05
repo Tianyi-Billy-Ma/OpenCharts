@@ -5,7 +5,12 @@ import { DEFAULT_CONFIG, type OpenChartsConfig } from "../../server/config.ts";
 import { MACRO_EVENTS, newYorkDate, upcomingEvents } from "../../server/events.ts";
 import { createScanner, handoffText } from "../../server/scanner.ts";
 import { openStore } from "../../server/store.ts";
-import { deliverWebhook, signWebhook } from "../../server/webhooks.ts";
+import {
+  deliverWebhook,
+  signWebhook,
+  verifyWebhook,
+  webhooksFromEnv,
+} from "../../server/webhooks.ts";
 import type { Candle } from "../services/schemas.ts";
 
 const DAY = 86_400;
@@ -166,6 +171,31 @@ describe("signal scanner", () => {
 });
 
 describe("webhooks", () => {
+  it("verifies signatures and rejects stale or tampered deliveries", () => {
+    const now = 1_800_000_000_000;
+    const ts = now / 1000;
+    const sig = signWebhook(SECRET, ts, "{}");
+    expect(verifyWebhook(SECRET, String(ts), sig, "{}", now)).toBe(true);
+    expect(verifyWebhook(SECRET, String(ts), sig, '{"x":1}', now)).toBe(false);
+    expect(verifyWebhook(SECRET, String(ts), sig, "{}", now + 301_000)).toBe(false);
+    expect(verifyWebhook(SECRET, undefined, sig, "{}", now)).toBe(false);
+  });
+
+  it("reads webhook settings from the environment, refusing unsafe ones", () => {
+    const env = { OPENCHARTS_WEBHOOK_URLS: "https://a.example/x, https://b.example/y" };
+    expect(webhooksFromEnv({}).webhooks).toBeNull();
+    expect(webhooksFromEnv(env).warning).toMatch(/SECRET/);
+    expect(webhooksFromEnv({ ...env, OPENCHARTS_WEBHOOK_SECRET: SECRET }).webhooks!.urls).toEqual([
+      "https://a.example/x",
+      "https://b.example/y",
+    ]);
+    const creds = {
+      OPENCHARTS_WEBHOOK_URLS: "https://u:p@a.example",
+      OPENCHARTS_WEBHOOK_SECRET: SECRET,
+    };
+    expect(webhooksFromEnv(creds).warning).toMatch(/user:password/);
+  });
+
   it("reports network errors without throwing", async () => {
     // Node's fetch can quote the URL, token and all, in its message.
     const impl = (async () => {

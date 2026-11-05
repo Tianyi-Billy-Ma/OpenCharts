@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 /**
  * Signed webhook delivery.
@@ -17,6 +17,53 @@ const TIMEOUT_MS = 10_000;
 
 export function signWebhook(secret: string, timestamp: number, body: string): string {
   return `sha256=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
+}
+
+/** Receiver side: true when the signature matches and the timestamp is within `maxAgeSeconds`. */
+export function verifyWebhook(
+  secret: string,
+  timestamp: string | undefined,
+  signature: string | undefined,
+  body: string,
+  nowMs = Date.now(),
+  maxAgeSeconds = 300,
+): boolean {
+  const ts = Number(timestamp);
+  if (!Number.isInteger(ts) || Math.abs(nowMs / 1000 - ts) > maxAgeSeconds) return false;
+  const want = Buffer.from(signWebhook(secret, ts, body));
+  const got = Buffer.from(signature ?? "");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+/**
+ * Webhook settings from the environment, or why they are off. Never echoes
+ * the URLs: they can hold tokens.
+ */
+export function webhooksFromEnv(env: Record<string, string | undefined>): {
+  webhooks: { urls: string[]; secret: string } | null;
+  warning?: string;
+} {
+  const urls = (env.OPENCHARTS_WEBHOOK_URLS ?? "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
+  const secret = env.OPENCHARTS_WEBHOOK_SECRET ?? "";
+  if (!urls.length) return { webhooks: null };
+  const bad = urls.filter((u) => {
+    const url = URL.parse(u);
+    return !url || !/^https?:$/.test(url.protocol) || url.username !== "" || url.password !== "";
+  });
+  if (bad.length)
+    return {
+      webhooks: null,
+      warning: `Webhooks are off: ${bad.length} URL(s) are not http(s) or hold a user:password. Put tokens in the path or query instead.`,
+    };
+  if (secret.length < 32)
+    return {
+      webhooks: null,
+      warning: "Webhooks are off: set OPENCHARTS_WEBHOOK_SECRET (32+ characters).",
+    };
+  return { webhooks: { urls, secret } };
 }
 
 export interface DeliveryResult {

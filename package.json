@@ -61,6 +61,8 @@
     "build:desk": "VITE_ADAPTER=alpaca vite build",
     "server": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/main.ts",
     "backtest": "node --env-file-if-exists=.env server/backtest-cli.ts",
+    "doctor": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/doctor.ts",
+    "webhook:receiver": "node --env-file-if-exists=.env server/webhook-receiver.ts",
     "check:size": "node scripts/check-bundle-size.mjs",
     "build:lib": "vite build --config vite.lib.config.ts && node scripts/build-lib-css.mjs",
     "check:package": "node scripts/check-package.mjs",

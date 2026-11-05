@@ -10,6 +10,19 @@ import type { Candle } from "../src/services/schemas.ts";
 
 const DATA_BASE = "https://data.alpaca.markets";
 const PAPER_BASE = "https://paper-api.alpaca.markets";
+
+/**
+ * Alpaca keys from the environment. Also reads the names Alpaca's own SDKs
+ * (APCA_API_*) and official MCP server (ALPACA_API_KEY) use, so one set of
+ * secrets serves both.
+ */
+export function alpacaCredentialsFromEnv(
+  env: Record<string, string | undefined>,
+): AlpacaCredentials | undefined {
+  const keyId = env.ALPACA_KEY_ID || env.ALPACA_API_KEY || env.APCA_API_KEY_ID;
+  const secretKey = env.ALPACA_SECRET_KEY || env.APCA_API_SECRET_KEY;
+  return keyId && secretKey ? { keyId, secretKey } : undefined;
+}
 const LIVE_BASE = "https://api.alpaca.markets";
 const STOCK_STREAM = "wss://stream.data.alpaca.markets/v2/iex";
 const CRYPTO_STREAM = "wss://stream.data.alpaca.markets/v1beta3/crypto/us";

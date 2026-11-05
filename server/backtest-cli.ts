@@ -1,5 +1,10 @@
 import { barCloseSeconds, closedBars, deskSignal } from "../src/lib/desk-signal.ts";
-import { createAlpacaClient, isCrypto, timeframeSeconds } from "./alpaca.ts";
+import {
+  alpacaCredentialsFromEnv,
+  createAlpacaClient,
+  isCrypto,
+  timeframeSeconds,
+} from "./alpaca.ts";
 import { runBacktest } from "./backtest.ts";
 import { loadConfig } from "./config.ts";
 
@@ -30,10 +35,8 @@ if (!seconds || !(years > 0)) {
   process.exit(1);
 }
 
-const keyId = process.env.ALPACA_KEY_ID;
-const secretKey = process.env.ALPACA_SECRET_KEY;
 const alpaca = createAlpacaClient({
-  credentials: keyId && secretKey ? { keyId, secretKey } : undefined,
+  credentials: alpacaCredentialsFromEnv(process.env),
   log: () => {},
 });
 

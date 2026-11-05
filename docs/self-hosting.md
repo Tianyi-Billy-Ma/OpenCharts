@@ -18,6 +18,17 @@ cp .env.example .env
 ```
 
 Put your key ID and secret in `.env`. Never commit it (it is in `.gitignore`).
+The names Alpaca's own tools use (`ALPACA_API_KEY`, `APCA_API_KEY_ID`,
+`APCA_API_SECRET_KEY`) work too. OpenCharts always trades on the paper
+account, whatever base URL is set.
+
+With a secret manager instead of `.env`, pass the secrets in at start, e.g.
+1Password: `op run --env-file=.env.op -- npm run server`, where `.env.op`
+holds references like `ALPACA_KEY_ID=op://<vault>/<item>/<field>`.
+
+Check the setup with `npm run doctor` (or `op run --env-file=.env.op -- npm run doctor`).
+It reaches the Alpaca paper account, checks each MCP token, and sends a signed
+test webhook, without printing any secret.
 
 Edit `opencharts.config.ts` to change the watchlist or the port. Stocks use
 plain tickers (`"NVDA"`); crypto uses Alpaca pairs (`"BTC/USD"`), shown in the
@@ -180,6 +191,11 @@ function verify(req, rawBody, secret) {
   return sig.length === want.length && timingSafeEqual(Buffer.from(sig), Buffer.from(want));
 }
 ```
+
+To try webhooks locally, run `npm run webhook:receiver` with the same
+`OPENCHARTS_WEBHOOK_SECRET`, set `OPENCHARTS_WEBHOOK_URLS=http://127.0.0.1:8788/`,
+then `npm run doctor`: the receiver prints each delivery and whether its
+signature checks out.
 
 `X-OpenCharts-Delivery` (`symbol:timeframe:barTime`) stays the same across
 retries, so receivers can drop duplicates.
