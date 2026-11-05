@@ -183,6 +183,7 @@ export function createScanner(deps: ScannerDeps) {
           settled,
         );
         lastError.delete(symbol);
+        let inOrder = Promise.resolve();
         const newest = bars.at(-1)?.time;
         if (newest != null) lastChecked.set(symbol, Math.max(newest, since ?? -Infinity));
         for (let k = 0; k < bars.length; k++) {
@@ -192,13 +193,16 @@ export function createScanner(deps: ScannerDeps) {
           const history = candles.slice(0, candles.length - bars.length + k + 1);
           const saved = record(symbol, bar, history, at);
           // shortcut: a crash mid-send leaves the signal "pending" and it is not resent; resend on start if that matters.
-          if (saved?.webhook === "pending") sending.push(
+          // Chained per symbol, so a retried older signal never lands after a newer one.
+          if (saved?.webhook === "pending")
+            inOrder = inOrder.then(() =>
               send(saved).catch((err: unknown) =>
                 log(`${symbol}: webhook not recorded: ${err instanceof Error ? err.message : String(err)}`),
               ),
             );
           if (saved) found.push(saved);
         }
+        sending.push(inOrder);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (lastError.get(symbol) !== message) log(`${symbol}: ${message}`);
