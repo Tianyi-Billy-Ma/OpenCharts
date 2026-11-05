@@ -16,7 +16,8 @@ import type { OrderDesk } from "./orders.ts";
  *
  * Writes need the `x-opencharts: 1` header. A cross-site page cannot send a
  * custom header without a CORS preflight, which this server never approves,
- * so another site cannot trade through the owner's browser session.
+ * so another site cannot trade through the owner's browser session. app.ts
+ * also refuses these routes on an unknown Host, which stops DNS rebinding.
  */
 
 export interface TerminalTradingOptions {
@@ -139,21 +140,9 @@ export async function handleTerminalTrading(
     id &&
     parts.length === 3
   ) {
-    const open = (await trading.getOpenOrders()).flatMap((o) => [o, ...o.legs]);
-    const order = open.find((o) => o.id === id);
-    if (!order) return reply(404, { error: `No open order ${id}` });
-    // Stops and targets protect a position; they go away when the position is closed.
-    if (order.side !== "buy")
-      return reply(422, {
-        error:
-          "Only entry orders can be cancelled here. Close the position instead.",
-      });
-    // Cancelling a partly filled bracket entry also cancels its stop, leaving the filled shares bare.
-    if (order.filledQty > 0)
-      return reply(422, {
-        error: "This entry has partly filled. Close the position instead.",
-      });
-    return reply(200, await orders.cancel(id, "terminal"));
+    // The desk refuses stops, targets and partly filled entries.
+    const result = await orders.cancel(id, "terminal");
+    return reply("error" in result ? result.status : 200, result);
   }
   if (
     resource === "positions" &&

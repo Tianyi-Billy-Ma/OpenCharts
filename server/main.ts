@@ -67,6 +67,7 @@ const orders =
         trading: marketData,
         store,
         blockedReason: () => guard?.blockedReason() ?? null,
+        guardActive: guard != null,
       })
     : undefined;
 

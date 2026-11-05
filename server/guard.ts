@@ -8,7 +8,17 @@ import {
 import type { OpenChartsConfig } from "./config.ts";
 import { deskSignalBars } from "./desk-tools.ts";
 import { newYorkDate } from "./events.ts";
-import { CRYPTO_STOP_LIMIT_GAP, roundPrice, sameSymbol } from "./orders.ts";
+import {
+  CRYPTO_STOP_LIMIT_GAP,
+  STOP_TYPES,
+  allOrders,
+  cancelAndClose,
+  cancelAndWait,
+  coveredQty,
+  realSleep,
+  roundPrice,
+  sameSymbol,
+} from "./orders.ts";
 import type { Store } from "./store.ts";
 
 /**
@@ -31,6 +41,7 @@ export interface GuardDeps {
   /** Tell the owner. Gets plain text. */
   alert: (text: string) => Promise<void>;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
   log?: (message: string) => void;
 }
 
@@ -40,16 +51,6 @@ export interface GuardStatus {
   /** Positions the guard could not protect, with failure counts. */
   failing: Record<string, number>;
 }
-
-const STOP_TYPES = new Set(["stop", "stop_limit", "trailing_stop"]);
-
-/** Every order, with bracket and OTO legs flattened in. */
-const allOrders = (orders: Order[]): Order[] =>
-  orders.flatMap((o) => [o, ...allOrders(o.legs)]);
-
-/** Bracket exit legs stay "held" until the entry fully fills, so they protect nothing yet. */
-const isLiveStop = (o: Order) =>
-  o.side === "sell" && STOP_TYPES.has(o.type) && o.status !== "held";
 
 /** "BTCUSD" (positions) back to the watchlist's "BTC/USD". */
 function watchName(position: Position, watchlist: string[]): string {
@@ -63,11 +64,17 @@ function watchName(position: Position, watchlist: string[]): string {
 export function createGuard(deps: GuardDeps) {
   const { config, trading, store } = deps;
   const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? realSleep;
   const log = deps.log ?? ((m: string) => console.log(`[guard] ${m}`));
   const watchlist = [...config.watchlist.stocks, ...config.watchlist.crypto];
   const failures = new Map<string, number>();
   const alerted = new Set<string>();
   const status: GuardStatus = { lastRun: null, blocked: null, failing: {} };
+  // When the guard last saw each ticker go flat, so a plan from that closed trade is not reused.
+  // shortcut: in memory, so a position closed by its stop while the server was down still
+  // leaves its plan in reach; persist it (or read FILL activities) if that ever bites.
+  const held = new Set<string>();
+  const closedAt = new Map<string, number>();
 
   const alertOnce = async (key: string, text: string) => {
     const dayKey = `${newYorkDate(now())}:${key}`;
@@ -82,18 +89,7 @@ export function createGuard(deps: GuardDeps) {
 
   const plannedStop = async (ticker: string, price: number) => {
     // The latest plan: a BUY we placed, or a "plan" row the Trader logged (official-MCP path).
-    // Queried by action, so scanner and note rows can never push the plan out of reach.
-    const planned = [
-      ...store.listJournal({ ticker, action: "order", limit: 500 }),
-      ...store.listJournal({ ticker, action: "plan", limit: 50 }),
-    ]
-      .filter(
-        (e) =>
-          e.stop != null &&
-          (e.action === "plan" ||
-            (e.reason.startsWith("BUY") && e.outcome.startsWith("placed"))),
-      )
-      .sort((a, b) => b.time - a.time || b.id - a.id)[0]?.stop;
+    const planned = store.plannedStop(ticker, closedAt.get(ticker));
     if (planned != null && planned < price)
       return { stop: planned, from: "journal plan" };
     const { bars } = await deskSignalBars(
@@ -111,63 +107,129 @@ export function createGuard(deps: GuardDeps) {
     };
   };
 
-  /** Cover `qty` shares (the part no live stop covers), or close the whole position. */
+  /** Cover the shares no live stop covers, or close the whole position. */
   const protect = async (
     position: Position,
     ticker: string,
-    qty: number,
     orders: Order[],
   ) => {
     if (config.guard.missingStop === "flatten") {
       // Open orders on the symbol hold its shares, and a close fails while they do.
-      for (const o of orders.filter((o) =>
-        sameSymbol(o.symbol, position.symbol),
-      ))
-        await trading.cancelOrder(o.id);
-      await trading.closePosition(position.symbol);
+      const closed = await cancelAndClose(trading, position.symbol, sleep);
       store.addJournal(
         {
           agent: "guard",
           ticker,
           action: "flatten",
-          size: position.qty,
-          outcome: "closed: no live stop",
+          size: closed.qty || position.qty,
+          outcome: closed.qty
+            ? "closed: no live stop"
+            : "closed already: an order sold it during the cancel",
         },
         now(),
       );
       return;
     }
+    const mine = allOrders(orders).filter((o) =>
+      sameSymbol(o.symbol, position.symbol),
+    );
+    // A partly filled bracket entry holds its legs back until it fills; then they activate for
+    // the full qty on top of any stop we add. Cancel its unfilled rest so only one stop exists.
+    const partial = mine.filter(
+      (o) =>
+        o.side === "buy" &&
+        o.filledQty > 0 &&
+        o.legs.some((l) => STOP_TYPES.has(l.type) && l.status === "held"),
+    );
+    if (partial.length) {
+      await cancelAndWait(
+        trading,
+        partial.map((o) => o.id),
+        sleep,
+      );
+      store.addJournal(
+        {
+          agent: "guard",
+          ticker,
+          action: "cancel",
+          reason:
+            "partly filled bracket entry; its held stop protected nothing",
+          outcome: `cancelled the unfilled rest of ${partial.map((o) => o.id).join(", ")}`,
+        },
+        now(),
+      );
+      const [positions, fresh] = await Promise.all([
+        trading.getPositions(),
+        trading.getOpenOrders(),
+      ]);
+      const current = positions.find((p) =>
+        sameSymbol(p.symbol, position.symbol),
+      );
+      if (!current || coveredQty(position.symbol, fresh) >= current.qty) return;
+      return protect(current, ticker, fresh);
+    }
+    const qty = Number(
+      (position.qty - coveredQty(position.symbol, orders)).toFixed(9),
+    );
+    if (!(qty > 0)) return;
+    const crypto = isCrypto(ticker);
+    // Worked out before anything is cancelled, so a failure here leaves the targets in place.
+    const { stop, from } = await plannedStop(ticker, position.currentPrice);
+    const stopPrice = roundPrice(stop, crypto);
     // A working target (a sell limit) holds shares too, and the stop is refused while it does.
     // The stop matters more, so the target goes.
-    const targets = orders.filter(
+    const targets = mine.filter(
       (o) =>
-        sameSymbol(o.symbol, position.symbol) &&
         o.side === "sell" &&
         o.type === "limit" &&
         o.status !== "held" &&
         // Cancelling one leg of an OCO or bracket cancels its stop too, so leave groups alone.
-        !o.legs.some((l) => STOP_TYPES.has(l.type)),
+        !o.legs.some((l) => STOP_TYPES.has(l.type)) &&
+        !mine.some((p) => p.legs.some((l) => l.id === o.id)),
     );
-    for (const o of targets) await trading.cancelOrder(o.id);
-    const crypto = isCrypto(ticker);
-    const { stop, from } = await plannedStop(ticker, position.currentPrice);
-    const stopPrice = roundPrice(stop, crypto);
-    const order = await trading.placeOrder({
-      symbol: ticker,
-      qty: String(qty),
-      side: "sell",
-      time_in_force: "gtc",
-      ...(crypto
-        ? {
-            type: "stop_limit",
-            stop_price: stopPrice,
-            limit_price: roundPrice(
-              stopPrice * (1 - CRYPTO_STOP_LIMIT_GAP),
-              true,
-            ),
-          }
-        : { type: "stop", stop_price: stopPrice }),
-    });
+    const cancelledNote = targets.length
+      ? `; cancelled ${targets.length} target order(s) holding the shares`
+      : "";
+    await cancelAndWait(
+      trading,
+      targets.map((o) => o.id),
+      sleep,
+    );
+    let order;
+    try {
+      order = await trading.placeOrder({
+        symbol: ticker,
+        qty: String(qty),
+        side: "sell",
+        time_in_force: "gtc",
+        ...(crypto
+          ? {
+              type: "stop_limit",
+              stop_price: stopPrice,
+              limit_price: roundPrice(
+                stopPrice * (1 - CRYPTO_STOP_LIMIT_GAP),
+                true,
+              ),
+            }
+          : { type: "stop", stop_price: stopPrice }),
+      });
+    } catch (err) {
+      if (targets.length)
+        store.addJournal(
+          {
+            agent: "guard",
+            ticker,
+            action: "stop",
+            size: qty,
+            stop: stopPrice,
+            reason: "open position had no live stop",
+            evidence: `stop from ${from}${cancelledNote}`,
+            outcome: `failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+          now(),
+        );
+      throw err;
+    }
     store.addJournal(
       {
         agent: "guard",
@@ -176,7 +238,7 @@ export function createGuard(deps: GuardDeps) {
         size: qty,
         stop: stopPrice,
         reason: "open position had no live stop",
-        evidence: `stop from ${from}${targets.length ? `; cancelled ${targets.length} target order(s) holding the shares` : ""}`,
+        evidence: `stop from ${from}${cancelledNote}`,
         outcome: `placed ${order.id}`,
       },
       now(),
@@ -190,12 +252,11 @@ export function createGuard(deps: GuardDeps) {
       trading.getOpenOrders(),
       trading.getAccount(),
     ]);
-    // A queued market SELL is already closing the position, so it counts like a stop.
-    const stops = allOrders(orders).filter(
-      (o) =>
-        isLiveStop(o) ||
-        (o.side === "sell" && o.type === "market" && o.status !== "held"),
-    );
+    const nowHeld = new Set(positions.map((p) => watchName(p, watchlist)));
+    for (const ticker of held)
+      if (!nowHeld.has(ticker)) closedAt.set(ticker, now());
+    held.clear();
+    for (const ticker of nowHeld) held.add(ticker);
 
     for (const position of positions) {
       const ticker = watchName(position, watchlist);
@@ -206,22 +267,14 @@ export function createGuard(deps: GuardDeps) {
         );
         continue;
       }
-      const covered = stops
-        .filter((o) => sameSymbol(o.symbol, position.symbol))
-        // A partly executed stop only protects what it has not sold yet.
-        .reduce((sum, o) => sum + o.qty - o.filledQty, 0);
-      if (covered >= position.qty) {
+      // A queued market SELL is already closing the position, so it counts like a stop.
+      if (coveredQty(position.symbol, orders) >= position.qty) {
         failures.delete(ticker);
         continue;
       }
       try {
-        // Rounded so float subtraction never sends Alpaca a qty like 0.30000000000000004.
-        await protect(
-          position,
-          ticker,
-          Number((position.qty - covered).toFixed(9)),
-          orders,
-        );
+        // protect() rounds the qty, so float subtraction never sends one like 0.30000000000000004.
+        await protect(position, ticker, orders);
         failures.delete(ticker);
       } catch (err) {
         const count = (failures.get(ticker) ?? 0) + 1;

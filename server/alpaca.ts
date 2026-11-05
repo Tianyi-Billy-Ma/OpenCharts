@@ -112,6 +112,8 @@ export interface Trading {
   /** Open orders, with bracket legs nested. */
   getOpenOrders(): Promise<Order[]>;
   getOrder(id: string): Promise<Order>;
+  /** The order sent with this `client_order_id`, or null when Alpaca has none. */
+  getOrderByClientId(clientOrderId: string): Promise<Order | null>;
   placeOrder(request: OrderRequest): Promise<Order>;
   cancelOrder(id: string): Promise<void>;
   closePosition(symbol: string): Promise<void>;
@@ -261,7 +263,10 @@ export function createAlpacaClient(
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      throw new Error(`Alpaca ${response.status}: ${detail.slice(0, 200) || response.statusText}`);
+      throw Object.assign(
+        new Error(`Alpaca ${response.status}: ${detail.slice(0, 200) || response.statusText}`),
+        { status: response.status },
+      );
     }
     return response.status === 204 ? null : response.json();
   };
@@ -408,6 +413,17 @@ export function createAlpacaClient(
           unknown
         >,
       );
+    },
+
+    async getOrderByClientId(clientOrderId) {
+      const url = trading("/v2/orders:by_client_order_id");
+      url.searchParams.set("client_order_id", clientOrderId);
+      try {
+        return toOrder((await getJson(url)) as Record<string, unknown>);
+      } catch (err) {
+        if ((err as { status?: number }).status === 404) return null;
+        throw err;
+      }
     },
 
     async placeOrder(request) {

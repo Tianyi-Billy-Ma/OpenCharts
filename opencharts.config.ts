@@ -7,6 +7,9 @@ export default {
   // Keep 127.0.0.1 unless the terminal sits behind an auth gate such as
   // Cloudflare Access. Docker sets 0.0.0.0 itself.
   host: "127.0.0.1",
+  // Domains (no port) you open the terminal on besides localhost, e.g. ["desk.example.com"].
+  // Trading and journal routes refuse any other Host, which stops DNS-rebinding pages.
+  allowedHosts: [],
   watchlist: {
     // AI-themed starter list. OpenAI and Anthropic are private, so their
     // biggest listed backers (MSFT, AMZN, GOOGL) stand in for them.

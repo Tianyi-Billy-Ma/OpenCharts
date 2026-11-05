@@ -73,6 +73,12 @@ export interface Store {
   addJournal(entry: NewJournalEntry, nowMs?: number): JournalEntry;
   /** Newest first. */
   listJournal(options?: { ticker?: string; action?: string; limit?: number }): JournalEntry[];
+  /**
+   * The newest planned stop for a ticker: a BUY our desk placed, or a Trader "plan" row.
+   * Only plans after the ticker was last closed through the journal (a SELL or a guard
+   * flatten) and after `sinceMs` count, so an old trade's stop is never reused.
+   */
+  plannedStop(ticker: string, sinceMs?: number): number | null;
   /** Saves a new signal. Returns null when this symbol, timeframe and bar is already saved. */
   recordSignal(
     s: Pick<SignalRecord, "symbol" | "timeframe" | "barTime" | "signal" | "detail" | "webhook">,
@@ -130,6 +136,14 @@ export function openStore(path: string): Store {
   const journalRows = db.prepare(
     `SELECT * FROM journal WHERE (? IS NULL OR ticker = ?) AND (? IS NULL OR action = ?)
      ORDER BY time_ms DESC, id DESC LIMIT ?`,
+  );
+  const plannedStopRow = db.prepare(
+    `SELECT stop FROM journal
+     WHERE ticker = ? AND stop IS NOT NULL
+       AND (action = 'plan' OR (action = 'order' AND reason LIKE 'BUY%' AND outcome LIKE 'placed%'))
+       AND time_ms > MAX(?, COALESCE((SELECT MAX(time_ms) FROM journal WHERE ticker = ?
+         AND (action = 'flatten' OR (action = 'order' AND reason LIKE 'SELL%' AND outcome LIKE 'closed%'))), 0))
+     ORDER BY time_ms DESC, id DESC LIMIT 1`,
   );
   const num = (v: unknown) => (v == null ? null : Number(v));
   // The UNIQUE key is the webhook dedupe: one POST per ticker per bar.
@@ -191,6 +205,10 @@ export function openStore(path: string): Store {
         row.outcome,
       );
       return { id: Number(result.lastInsertRowid), time: nowMs, ...row };
+    },
+    plannedStop(ticker, sinceMs = 0) {
+      const row = plannedStopRow.get(ticker, sinceMs, ticker);
+      return row ? Number(row.stop) : null;
     },
     listJournal({ ticker, action, limit = 100 } = {}) {
       return journalRows
