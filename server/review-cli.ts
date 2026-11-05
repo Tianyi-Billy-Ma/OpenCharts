@@ -44,10 +44,14 @@ if (!fills.length) {
 const { trades: paper, open } = roundTrips(fills);
 const start = fills[0]!.time;
 
-// SPY's daily bars are the market's trading days.
+// SPY's daily bars are the market's trading days, counted from the first fill's New York date.
+const nyDate = (ms: number) =>
+  new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 const tradingDays = (
-  await alpaca.getBars({ symbol: "SPY", timeframe: "1d", fromMs: start, limit: 10_000 }).catch(fail)
-).length;
+  await alpaca
+    .getBars({ symbol: "SPY", timeframe: "1d", fromMs: start - 86_400_000, limit: 10_000 })
+    .catch(fail)
+).filter((b) => nyDate(b.time * 1000) >= nyDate(start)).length;
 
 // Pages forward by date: the whole paper window, plus enough earlier bars to warm up the EMAs.
 const WARMUP_BARS = 400;
