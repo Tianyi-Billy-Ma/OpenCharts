@@ -101,20 +101,22 @@ export function createOrderDesk(deps: OrderDeskDeps) {
     const crypto = isCrypto(args.ticker);
     const { qty, stop, target } = args;
     const rejected: string[] = [];
-    if (!store.isApproved(args.ticker, now()))
-      rejected.push(`${args.ticker} has no live Risk Officer approval`);
-    const blocked = deps.blockedReason();
-    if (blocked) rejected.push(`new entries are blocked: ${blocked}`);
     if (qty == null || !(qty > 0)) rejected.push("qty must be above 0");
     else if (!crypto && !Number.isInteger(qty))
       rejected.push("stock qty must be whole shares (bracket orders cannot be fractional)");
     if (stop == null || !(stop > 0)) rejected.push("every BUY needs a stop");
 
-    const [account, positions, entry] = await Promise.all([
+    const [account, positions, openOrders, entry] = await Promise.all([
       trading.getAccount(),
       trading.getPositions(),
+      trading.getOpenOrders(),
       price(args.ticker),
     ]);
+    // Checked after the awaits, so a revoke or block that lands meanwhile still stops the order.
+    if (!store.isApproved(args.ticker, now()))
+      rejected.push(`${args.ticker} has no live Risk Officer approval`);
+    const blocked = deps.blockedReason();
+    if (blocked) rejected.push(`new entries are blocked: ${blocked}`);
     if (stop != null && stop >= entry)
       rejected.push(`stop ${stop} must be below the price ${entry}`);
     if (target != null && target <= entry)
@@ -126,11 +128,18 @@ export function createOrderDesk(deps: OrderDeskDeps) {
       rejected.push(
         `daily loss stop: down ${(-dayPct).toFixed(2)}% today (limit ${dailyLossPct}%)`,
       );
-    const existing = positions.find((p) => sameSymbol(p.symbol, args.ticker));
-    if (!existing && positions.length >= maxOpenPositions)
+    // Unfilled BUYs count as if filled, so queued orders cannot slip past the limits.
+    const pendingBuys = openOrders.filter((o) => o.side === "buy");
+    const held = new Set([...positions, ...pendingBuys].map((p) => p.symbol.replace("/", "")));
+    if (!held.has(args.ticker.replace("/", "")) && held.size >= maxOpenPositions)
       rejected.push(`already at the limit of ${maxOpenPositions} open positions`);
     if (qty != null && qty > 0 && account.equity > 0) {
-      const pct = (((existing?.marketValue ?? 0) + qty * entry) / account.equity) * 100;
+      const existing = positions.find((p) => sameSymbol(p.symbol, args.ticker));
+      const pending = pendingBuys
+        .filter((o) => sameSymbol(o.symbol, args.ticker))
+        .reduce((sum, o) => sum + o.qty, 0);
+      const value = (existing?.marketValue ?? 0) + (pending + qty) * entry;
+      const pct = (value / account.equity) * 100;
       if (pct > maxPositionPct)
         rejected.push(`position would be ${pct.toFixed(1)}% of equity (limit ${maxPositionPct}%)`);
     }
@@ -221,9 +230,17 @@ export function createOrderDesk(deps: OrderDeskDeps) {
     return { ok: true, rejected: [], orders: [] };
   };
 
+  // BUYs run one at a time, so two concurrent requests cannot both spend the same limit.
+  let buying: Promise<unknown> = Promise.resolve();
+  const queuedBuy = (args: OrderArgs, agent: string) => {
+    const run = buying.then(() => buy(args, agent));
+    buying = run.catch(() => {});
+    return run;
+  };
+
   return {
     place: (args: OrderArgs, agent: string) =>
-      args.side === "buy" ? buy(args, agent) : sell(args, agent),
+      args.side === "buy" ? queuedBuy(args, agent) : sell(args, agent),
     async cancel(orderId: string, agent: string) {
       await trading.cancelOrder(orderId);
       store.addJournal({ agent, action: "cancel", outcome: `cancelled ${orderId}` }, now());

@@ -10,6 +10,7 @@ import { addTradingDays, openStore } from "../../server/store.ts";
 
 const DESK = "d".repeat(40);
 const RISK = "r".repeat(40);
+const TRADER = "t".repeat(40);
 const NOW = Date.parse("2026-11-06T21:00:00Z"); // a Friday
 
 /** Daily bars ending well before NOW, so every one is closed. */
@@ -47,6 +48,7 @@ const app = createApp({
     tokens: [
       { token: DESK, role: "desk" },
       { token: RISK, role: "risk" },
+      { token: TRADER, role: "trader" },
     ],
     version: "test",
   }),
@@ -196,7 +198,10 @@ describe("MCP server", () => {
 
     const set = (await call(RISK, "set_approval", { ticker: "NVDA" })).structuredContent!.result;
     expect(set.until).toBe("2026-11-13T21:00:00.000Z"); // 5 trading days after a Friday
-    expect(store.listJournal({ action: "approve" })[0]).toMatchObject({ agent: "risk", ticker: "NVDA" });
+    expect(store.listJournal({ action: "approve" })[0]).toMatchObject({
+      agent: "risk",
+      ticker: "NVDA",
+    });
     expect((await call(RISK, "set_approval", { ticker: "SPY" })).isError).toBe(true); // not on the watchlist
     expect(
       (await call(RISK, "set_approval", { ticker: "NVDA", until: "2020-01-01" })).isError,
@@ -259,6 +264,10 @@ describe("journal and order tools", () => {
     expect(ok.structuredContent!.result).toMatchObject({ agent: "Analyst", ticker: "NVDA" });
     const forged = await call(DESK, "add_journal_entry", { agent: "x", action: "order", stop: 1 });
     expect(forged.isError).toBe(true);
+    // The guard trusts "plan" stops, so only the Trader's token may log them.
+    const plan = { agent: "trader", action: "plan", ticker: "NVDA", stop: 1 };
+    expect((await call(DESK, "add_journal_entry", plan)).isError).toBe(true);
+    expect((await call(TRADER, "add_journal_entry", plan)).isError).toBeFalsy();
     const rows = (await call(DESK, "list_journal", { ticker: "NVDA" })).structuredContent!.result;
     expect(rows.some((r: { action: string }) => r.action === "idea")).toBe(true);
   });

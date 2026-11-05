@@ -270,7 +270,7 @@ export function journalCsv(entries: JournalEntry[]): string {
   const cell = (v: unknown) => {
     const text = v == null ? "" : String(v);
     // Quote when needed, and defuse spreadsheet formulas (=, +, -, @).
-    const safe = /^[=+\-@\t\r]/.test(text) && !/^-?\d/.test(text) ? `'${text}` : text;
+    const safe = /^[=+\-@\t\r]/.test(text) && typeof v !== "number" ? `'${text}` : text;
     return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
   };
   const rows = [...entries]

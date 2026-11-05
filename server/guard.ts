@@ -40,6 +40,9 @@ const STOP_TYPES = new Set(["stop", "stop_limit", "trailing_stop"]);
 /** Every order, with bracket and OTO legs flattened in. */
 const allOrders = (orders: Order[]): Order[] => orders.flatMap((o) => [o, ...allOrders(o.legs)]);
 
+/** Bracket exit legs stay "held" until the entry fully fills, so they protect nothing yet. */
+const isLiveStop = (o: Order) => o.side === "sell" && STOP_TYPES.has(o.type) && o.status !== "held";
+
 /** "BTCUSD" (positions) back to the watchlist's "BTC/USD". */
 function watchName(position: Position, watchlist: string[]): string {
   const known = watchlist.find((s) => sameSymbol(s, position.symbol));
@@ -87,8 +90,12 @@ export function createGuard(deps: GuardDeps) {
     };
   };
 
-  const protect = async (position: Position, ticker: string) => {
+  /** Cover `qty` shares (the part no live stop covers), or close the whole position. */
+  const protect = async (position: Position, ticker: string, qty: number, orders: Order[]) => {
     if (config.guard.missingStop === "flatten") {
+      // Open orders on the symbol hold its shares, and a close fails while they do.
+      for (const o of orders.filter((o) => sameSymbol(o.symbol, position.symbol)))
+        await trading.cancelOrder(o.id);
       await trading.closePosition(position.symbol);
       store.addJournal(
         {
@@ -107,7 +114,7 @@ export function createGuard(deps: GuardDeps) {
     const stopPrice = roundPrice(stop, crypto);
     const order = await trading.placeOrder({
       symbol: ticker,
-      qty: String(position.qty),
+      qty: String(qty),
       side: "sell",
       time_in_force: "gtc",
       ...(crypto
@@ -123,7 +130,7 @@ export function createGuard(deps: GuardDeps) {
         agent: "guard",
         ticker,
         action: "stop",
-        size: position.qty,
+        size: qty,
         stop: stopPrice,
         reason: "open position had no live stop",
         evidence: `stop from ${from}`,
@@ -140,7 +147,7 @@ export function createGuard(deps: GuardDeps) {
       trading.getOpenOrders(),
       trading.getAccount(),
     ]);
-    const stops = allOrders(orders).filter((o) => o.side === "sell" && STOP_TYPES.has(o.type));
+    const stops = allOrders(orders).filter(isLiveStop);
 
     for (const position of positions) {
       const ticker = watchName(position, watchlist);
@@ -159,8 +166,8 @@ export function createGuard(deps: GuardDeps) {
         continue;
       }
       try {
-        // shortcut: a partly covered position gets a stop for its full size; cancel the old stop first if that matters.
-        await protect(position, ticker);
+        // Rounded so float subtraction never sends Alpaca a qty like 0.30000000000000004.
+        await protect(position, ticker, Number((position.qty - covered).toFixed(9)), orders);
         failures.delete(ticker);
       } catch (err) {
         const count = (failures.get(ticker) ?? 0) + 1;

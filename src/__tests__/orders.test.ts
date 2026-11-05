@@ -166,6 +166,52 @@ describe("order desk", () => {
     expect(r.rejected).toEqual(["new entries are blocked: no stop on AMD"]);
   });
 
+  it("rechecks approval after its lookups, so a revoke mid-check still stops the BUY", async () => {
+    const { store, desk, placed, trading } = setup();
+    store.setApproval("NVDA", NOW + DAY * 1000, NOW);
+    const getAccount = trading.getAccount;
+    trading.getAccount = async () => {
+      store.revokeApproval("NVDA", NOW);
+      return getAccount();
+    };
+    const res = await desk.place(buy, "trader");
+    expect(res.ok).toBe(false);
+    expect(placed).toEqual([]);
+  });
+
+  it("counts unfilled BUYs against the limits, and runs concurrent BUYs one at a time", async () => {
+    const open: Order[] = [order({ symbol: "NVDA", qty: 60 })];
+    const { store, desk, placed, trading } = setup({ open });
+    store.setApproval("NVDA", NOW + DAY * 1000, NOW);
+    // 60 queued + 50 more at $100 is 11% of $100k equity.
+    expect((await desk.place({ ...buy, qty: 50 }, "trader")).rejected).toContain(
+      "position would be 11.0% of equity (limit 10%)",
+    );
+    open.length = 0;
+    // Each order shows up as open once placed; the second must see the first.
+    const placeOrder = trading.placeOrder;
+    trading.placeOrder = async (req) => {
+      const o = await placeOrder(req);
+      open.push(order({ symbol: String(req.symbol), qty: Number(req.qty) }));
+      return o;
+    };
+    const both = await Promise.all([
+      desk.place({ ...buy, qty: 60 }, "trader"),
+      desk.place({ ...buy, qty: 60 }, "trader"),
+    ]);
+    expect(both.map((r) => r.ok)).toEqual([true, false]);
+    expect(placed).toHaveLength(1);
+  });
+
+  it("counts symbols with unfilled BUYs as open positions", async () => {
+    const open = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"].map((symbol) => order({ symbol }));
+    const { store, desk } = setup({ open });
+    store.setApproval("NVDA", NOW + DAY * 1000, NOW);
+    expect((await desk.place(buy, "trader")).rejected).toContain(
+      "already at the limit of 5 open positions",
+    );
+  });
+
   it("buys crypto at market, then places a separate stop-limit once filled", async () => {
     const { store, desk, placed } = setup();
     store.setApproval("BTC/USD", NOW + DAY * 1000, NOW);
@@ -231,6 +277,26 @@ describe("position guard", () => {
     expect(placed).toEqual([]);
   });
 
+  it("does not count a held bracket leg (entry not fully filled) as a stop", async () => {
+    const parent = order({
+      orderClass: "bracket",
+      status: "partially_filled",
+      legs: [order({ side: "sell", type: "stop", qty: 10, status: "held" })],
+    });
+    const { guard, placed } = guardSetup({ positions: [position({ qty: 4 })], open: [parent] });
+    await guard.runOnce();
+    expect(placed[0]).toMatchObject({ qty: "4", type: "stop" });
+  });
+
+  it("covers only the shares a partial stop leaves unprotected", async () => {
+    const { guard, placed } = guardSetup({
+      positions: [position({})],
+      open: [order({ side: "sell", type: "stop", qty: 4 })],
+    });
+    await guard.runOnce();
+    expect(placed[0]).toMatchObject({ qty: "6", type: "stop" });
+  });
+
   it("places a missing stop from the journal's plan", async () => {
     const { store, guard, placed } = guardSetup({ positions: [position({})] });
     store.addJournal({ agent: "trader", ticker: "NVDA", action: "plan", stop: 93.5 }, NOW);
@@ -272,9 +338,14 @@ describe("position guard", () => {
     expect(guard.blockedReason()).toBeNull();
   });
 
-  it("can close an unprotected position instead", async () => {
-    const { guard, closed, placed } = guardSetup({ positions: [position({})] }, "flatten");
+  it("can close an unprotected position instead, cancelling its orders first", async () => {
+    const target = order({ id: "t1", side: "sell", type: "limit", qty: 10 });
+    const { guard, closed, placed, cancelled } = guardSetup(
+      { positions: [position({})], open: [target] },
+      "flatten",
+    );
     await guard.runOnce();
+    expect(cancelled).toEqual(["t1"]);
     expect(closed).toEqual(["NVDA"]);
     expect(placed).toEqual([]);
   });
@@ -299,6 +370,7 @@ describe("journal CSV", () => {
     const store = openStore(":memory:");
     store.addJournal({ agent: "Analyst", action: "idea", reason: 'say "hi", ok' }, NOW);
     store.addJournal({ agent: "x", action: "note", evidence: "=HYPERLINK(1)", entry: -5 }, NOW + 1);
+    store.addJournal({ agent: "x", action: "note", reason: "-1+2" }, NOW + 2);
     const csv = journalCsv(store.listJournal());
     const lines = csv.trim().split("\n");
     expect(lines[0]).toBe(
@@ -307,5 +379,6 @@ describe("journal CSV", () => {
     expect(lines[1]).toContain('"say ""hi"", ok"');
     expect(lines[2]).toContain("'=HYPERLINK(1)");
     expect(lines[2]).toContain(",-5,");
+    expect(lines[3]).toContain(",'-1+2,");
   });
 });

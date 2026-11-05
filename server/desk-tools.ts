@@ -446,7 +446,7 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
     {
       name: "add_journal_entry",
       description:
-        'Log an idea, rejection, note or outcome in the desk journal (the source of truth for the Trade Journal). After an order placed outside this server, log action "plan" with its stop: the position guard uses it if the stop goes missing.',
+        'Log an idea, rejection, note or outcome in the desk journal (the source of truth for the Trade Journal). After an order placed outside this server, log action "plan" with its stop (Trader token only): the position guard uses it if the stop goes missing.',
       inputSchema: {
         type: "object",
         properties: {
@@ -466,7 +466,7 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
         },
         required: ["agent", "action"],
       },
-      run: async (args) => {
+      run: async (args, { role }) => {
         const text = (key: string) => {
           const v = str(args, key);
           if (v && v.length > 2000) throw new Error(`${key} is over 2000 characters`);
@@ -478,6 +478,9 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
         // Order and stop rows come from the backend only, so the guard can trust their stops.
         if (["order", "stop", "flatten", "alert", "approve", "revoke"].includes(action))
           throw new Error(`"${action}" rows are written by the backend; use another action`);
+        // The guard places stops from "plan" rows, so only the Trader may write them.
+        if (action === "plan" && role !== "trader")
+          throw new Error('only the Trader\'s token may log "plan" rows');
         return store.addJournal(
           {
             agent,
