@@ -1,7 +1,12 @@
 // @vitest-environment node
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { MarketData, Order, OrderRequest, Trading } from "../../server/alpaca.ts";
+import type {
+  MarketData,
+  Order,
+  OrderRequest,
+  Trading,
+} from "../../server/alpaca.ts";
 import { createApp } from "../../server/app.ts";
 import { DEFAULT_CONFIG } from "../../server/config.ts";
 import { createOrderDesk } from "../../server/orders.ts";
@@ -67,7 +72,12 @@ const trading: Trading = {
   closePosition: async () => {},
 };
 const marketData = {
-  getQuote: async (symbol: string) => ({ symbol, bid: 99.9, ask: 100, timestamp: Date.now() }),
+  getQuote: async (symbol: string) => ({
+    symbol,
+    bid: 99.9,
+    ask: 100,
+    timestamp: Date.now(),
+  }),
   getBars: async () => [],
   streamQuotes: () => () => {},
   getNews: async () => [],
@@ -99,7 +109,9 @@ const urlOf = (app: typeof withOrders) =>
   `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 beforeAll(async () => {
   for (const app of [withOrders, readOnly])
-    await new Promise<void>((resolve) => app.server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      app.server.listen(0, "127.0.0.1", resolve),
+    );
 });
 afterAll(() => {
   withOrders.close();
@@ -110,7 +122,11 @@ describe("terminal trading", () => {
   it("shows the account as PAPER and the crypto stop on its position", async () => {
     const gateway = createAlpacaTrading({ baseUrl: urlOf(withOrders) });
     const [account] = await gateway.getAccounts();
-    expect(account).toMatchObject({ label: "Alpaca PAPER", phase: "PAPER", equity: 100_000 });
+    expect(account).toMatchObject({
+      label: "Alpaca PAPER",
+      phase: "PAPER",
+      equity: 100_000,
+    });
     const [btc] = await gateway.getPositions(account!.id);
     expect(btc).toMatchObject({ id: "BTCUSD", side: "LONG", stopLoss: 57_000 });
     const listed = await gateway.getOrders(account!.id);
@@ -129,9 +145,9 @@ describe("terminal trading", () => {
     };
     await expect(gateway.placeOrder(input)).rejects.toThrow(/approval/);
     store.setApproval("NVDA", Date.now() + 86_400_000, Date.now());
-    await expect(gateway.placeOrder({ ...input, stopLoss: undefined })).rejects.toThrow(
-      /needs a stop/,
-    );
+    await expect(
+      gateway.placeOrder({ ...input, stopLoss: undefined }),
+    ).rejects.toThrow(/needs a stop/);
     const placedOrder = await gateway.placeOrder(input);
     expect(placedOrder.symbolName).toBe("NVDA");
     expect(placed.at(-1)).toMatchObject({
@@ -139,7 +155,9 @@ describe("terminal trading", () => {
       time_in_force: "gtc",
       stop_loss: { stop_price: 95 },
     });
-    expect(store.listJournal({ limit: 5 }).some((r) => r.agent === "terminal")).toBe(true);
+    expect(
+      store.listJournal({ limit: 5 }).some((r) => r.agent === "terminal"),
+    ).toBe(true);
   });
 
   it("refuses shorts and cancelling a stop", async () => {
@@ -153,18 +171,27 @@ describe("terminal trading", () => {
         quantity: 1,
       }),
     ).rejects.toThrow(/long only/);
-    await expect(gateway.cancelOrder("btc-stop")).rejects.toThrow(/Close the position/);
+    await expect(gateway.cancelOrder("btc-stop")).rejects.toThrow(
+      /Close the position/,
+    );
     await gateway.cancelOrder("entry-1");
     expect(cancelled).toEqual(["entry-1"]);
   });
 
   it("needs the x-opencharts header, and orders.enabled, to write", async () => {
     const post = (base: string, headers: Record<string, string>) =>
-      fetch(`${base}/api/trading/orders/entry-1/cancel`, { method: "POST", headers });
+      fetch(`${base}/api/trading/orders/entry-1/cancel`, {
+        method: "POST",
+        headers,
+      });
     expect((await post(urlOf(withOrders), {})).status).toBe(403);
     const off = await post(urlOf(readOnly), { "x-opencharts": "1" });
     expect(off.status).toBe(403);
-    expect(((await off.json()) as { error: string }).error).toMatch(/orders.enabled/);
-    expect((await fetch(`${urlOf(readOnly)}/api/trading/account`)).status).toBe(200);
+    expect(((await off.json()) as { error: string }).error).toMatch(
+      /orders.enabled/,
+    );
+    expect((await fetch(`${urlOf(readOnly)}/api/trading/account`)).status).toBe(
+      200,
+    );
   });
 });

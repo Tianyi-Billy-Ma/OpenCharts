@@ -7,6 +7,7 @@ import { createMcpHandler, type McpToken } from "./mcp.ts";
 import { createGuard } from "./guard.ts";
 import { createOrderDesk } from "./orders.ts";
 import { createScanner } from "./scanner.ts";
+import { createSheetsExporter, sheetsFromEnv } from "./sheets.ts";
 import { openStore } from "./store.ts";
 import { deliverWebhook, webhooksFromEnv } from "./webhooks.ts";
 
@@ -38,15 +39,26 @@ const alert = async (text: string) => {
   if (!webhooks) return;
   const body = JSON.stringify({ type: "alert", text });
   const id = `alert:${Date.now()}`;
-  await Promise.all(webhooks.urls.map((url) => deliverWebhook(url, body, webhooks!.secret, id)));
+  await Promise.all(
+    webhooks.urls.map((url) => deliverWebhook(url, body, webhooks!.secret, id)),
+  );
 };
 const guard =
   config.guard.enabled && credentials
     ? createGuard({ config, marketData, trading: marketData, store, alert })
     : null;
 if (config.guard.enabled && !credentials)
-  console.warn("[opencharts] The position guard needs Alpaca keys, so it is off.");
+  console.warn(
+    "[opencharts] The position guard needs Alpaca keys, so it is off.",
+  );
 const stopGuard = guard ? guard.start() : () => {};
+const sheets = sheetsFromEnv(process.env, config.sheets.tab);
+if (sheets.warning) console.warn(`[opencharts] ${sheets.warning}`);
+const stopSheets = sheets.target
+  ? createSheetsExporter({ target: sheets.target, store }).start(
+      config.sheets.everyMinutes,
+    )
+  : () => {};
 const orders =
   config.orders.enabled && credentials
     ? createOrderDesk({
@@ -69,12 +81,16 @@ for (const [env, role] of [
   const token = process.env[env];
   if (!token) continue;
   if (token.length < 32) {
-    console.warn(`[opencharts] ${env} is shorter than 32 characters, so it is ignored.`);
+    console.warn(
+      `[opencharts] ${env} is shorter than 32 characters, so it is ignored.`,
+    );
     continue;
   }
   tokens.push({ token, role });
 }
-const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
+const { version } = JSON.parse(readFileSync("package.json", "utf8")) as {
+  version: string;
+};
 const mcp = tokens.length
   ? createMcpHandler({
       tools: createDeskTools({ config, marketData, store, orders }),
@@ -82,7 +98,10 @@ const mcp = tokens.length
       version,
     })
   : undefined;
-if (!mcp) console.warn("[opencharts] No MCP token set, so /mcp is off. See .env.example.");
+if (!mcp)
+  console.warn(
+    "[opencharts] No MCP token set, so /mcp is off. See .env.example.",
+  );
 
 const app = createApp({
   config,
@@ -93,17 +112,22 @@ const app = createApp({
   mcp,
   guardStatus: guard?.status,
   // Paper only: live keys come after the go-live gate (docs/requirements.md 5.5).
-  trading: credentials ? { trading: marketData, orders, mode: "paper" } : undefined,
+  trading: credentials
+    ? { trading: marketData, orders, mode: "paper" }
+    : undefined,
 });
 
 app.server.listen(port, host, () => {
-  console.log(`[opencharts] http://${host}:${port}${mcp ? ` (MCP at /mcp)` : ""}`);
+  console.log(
+    `[opencharts] http://${host}:${port}${mcp ? ` (MCP at /mcp)` : ""}`,
+  );
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     stopScanner();
     stopGuard();
+    stopSheets();
     app.close();
     store.close();
     process.exit(0);

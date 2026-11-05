@@ -233,6 +233,7 @@ you give it live keys. These safety features work whichever order path you use.
   - Bots add ideas, rejections and notes with `add_journal_entry`.
   - After an order placed through Alpaca's official MCP, the Trader should log `action: "plan"` with the stop, so the guard can restore it.
   - Download everything with `GET /api/journal.csv`.
+  - **Google Sheets copy (optional):** set `OPENCHARTS_SHEETS_ID` and `GOOGLE_SERVICE_ACCOUNT_JSON` in `.env`, and share the sheet with the service account's email as an Editor. Every 15 minutes (`sheets.everyMinutes`) the backend rewrites its own tab, `OpenCharts Journal` by default (`sheets.tab`). It creates the tab if needed and never writes to any other tab, so bots can keep their own tab in the same sheet. Text is written as plain values, never formulas. `npm run doctor` checks the access.
 
 ## Deploying
 
