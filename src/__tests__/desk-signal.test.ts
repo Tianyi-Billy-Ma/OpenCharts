@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { closedBars, deskSignal, DEFAULT_DESK_SIGNAL_PARAMS } from "../lib/desk-signal.ts";
+import {
+  barCloseSeconds,
+  closedBars,
+  deskSignal,
+  DEFAULT_DESK_SIGNAL_PARAMS,
+} from "../lib/desk-signal.ts";
 import { swingPoints, volumeSma, type CandleData } from "../lib/indicators.ts";
 
 const DAY = 86_400;
@@ -41,7 +46,13 @@ describe("volumeSma", () => {
 describe("swingPoints", () => {
   it("finds pivots and marks when each is confirmed", () => {
     const highs = [1, 2, 5, 2, 1, 2, 3];
-    const bars = highs.map((h, i) => ({ time: i, open: h, high: h, low: h - 1, close: h }));
+    const bars = highs.map((h, i) => ({
+      time: i,
+      open: h,
+      high: h,
+      low: h - 1,
+      close: h,
+    }));
     const { highs: found } = swingPoints(bars, 2);
     expect(found).toHaveLength(1);
     expect(found[0]).toMatchObject({ index: 2, value: 5, confirmedAt: 4 });
@@ -53,6 +64,20 @@ describe("closedBars", () => {
     const bars = [{ time: 0 }, { time: DAY }];
     expect(closedBars(bars, DAY, (DAY + 100) * 1000)).toHaveLength(1);
     expect(closedBars(bars, DAY, 2 * DAY * 1000)).toHaveLength(2);
+  });
+
+  it("treats a stock day bar as closed at 16:00 New York", () => {
+    // Alpaca stamps the 2026-11-04 bar at midnight New York (05:00 UTC).
+    const stamp = Date.parse("2026-11-04T05:00:00Z") / 1000;
+    const close = barCloseSeconds(DAY, true);
+    expect(
+      closedBars([{ time: stamp }], close, Date.parse("2026-11-04T21:10:00Z")),
+    ).toHaveLength(1);
+    expect(
+      closedBars([{ time: stamp }], close, Date.parse("2026-11-04T20:59:00Z")),
+    ).toHaveLength(0);
+    expect(barCloseSeconds(DAY, false)).toBe(DAY);
+    expect(barCloseSeconds(3600, true)).toBe(3600);
   });
 });
 
@@ -66,7 +91,12 @@ describe("deskSignal", () => {
   it("fires BUY on a breakout with volume and RSI, and not without volume", () => {
     const bars = trendBars(260);
     const last = bars[259]!;
-    bars[259] = { ...last, close: last.close + 8, high: last.close + 8.2, volume: 2000 };
+    bars[259] = {
+      ...last,
+      close: last.close + 8,
+      high: last.close + 8.2,
+      volume: 2000,
+    };
     expect(deskSignal(bars)[259]!.signal).toBe("BUY");
 
     bars[259] = { ...bars[259]!, volume: 1400 }; // below 1.5x the 20-bar average
@@ -76,7 +106,12 @@ describe("deskSignal", () => {
   it("fires SELL on the mirror-image breakdown", () => {
     const bars = trendBars(260, 200, -0.2);
     const last = bars[259]!;
-    bars[259] = { ...last, close: last.close - 8, low: last.close - 8.2, volume: 2000 };
+    bars[259] = {
+      ...last,
+      close: last.close - 8,
+      low: last.close - 8.2,
+      volume: 2000,
+    };
     const bar = deskSignal(bars)[259]!;
     expect(bar.trend).toBe("bearish");
     expect(bar.signal).toBe("SELL");
@@ -99,7 +134,10 @@ describe("deskSignal", () => {
   });
 
   it("only uses swing points that were confirmed by that bar", () => {
-    const out = deskSignal(trendBars(60), { ...DEFAULT_DESK_SIGNAL_PARAMS, swingStrength: 2 });
+    const out = deskSignal(trendBars(60), {
+      ...DEFAULT_DESK_SIGNAL_PARAMS,
+      swingStrength: 2,
+    });
     // The first pivot can sit at index 2 at the earliest and is known at index 4.
     expect(out[3]!.swingHigh).toBeNull();
     expect(out.some((b) => b.swingHigh != null)).toBe(true);

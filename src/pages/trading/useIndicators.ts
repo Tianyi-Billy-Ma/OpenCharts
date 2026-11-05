@@ -212,6 +212,7 @@ export function useIndicators(
         case "DESK": {
           // Same code as the backend scanner, on closed bars only.
           // shortcut: uses the default rules, not opencharts.config.ts; read them from the backend if users customise.
+          // shortcut: the chart doesn't know stock from crypto, so a stock day bar shows from midnight, not 16:00; pass the symbol's session in if that matters.
           const barMs = timeframe ? TF_INTERVAL_MS[timeframe] : 0;
           const bars = deskSignal(barMs ? closedBars(indCandles, barMs / 1000) : indCandles);
           const emaLines = DESK_EMA_COLORS.map((color, k) => {

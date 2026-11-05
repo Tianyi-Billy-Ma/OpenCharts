@@ -50,6 +50,9 @@ export function runBacktest(
   const fallbackAtr = options.fallbackStopAtr ?? 2;
   const trades: Trade[] = [];
   let barsInMarket = 0;
+  let equity = 1;
+  let peak = 1;
+  let maxDrawdown = 0;
 
   let i = 0;
   while (i < candles.length - 1) {
@@ -62,7 +65,8 @@ export function runBacktest(
     const entryIndex = i + 1;
     const entry = candles[entryIndex]!.open;
     const atrStop = s.atr != null ? entry - fallbackAtr * s.atr : entry * 0.95;
-    const stop = s.swingLow != null && s.swingLow < entry ? s.swingLow : atrStop;
+    const stop =
+      s.swingLow != null && s.swingLow < entry ? s.swingLow : atrStop;
 
     let exitIndex = entryIndex;
     let exit = candles[entryIndex]!.close;
@@ -75,19 +79,29 @@ export function runBacktest(
         reason = "stop";
         break;
       }
+      // The deadline close comes before a SELL that would exit at the next open.
+      if (j - entryIndex + 1 >= maxHold) {
+        exit = bar.close;
+        reason = "time";
+        break;
+      }
       if (signals[j]!.signal === "SELL" && j + 1 < candles.length) {
         exitIndex = j + 1;
         exit = candles[j + 1]!.open;
         reason = "sell";
         break;
       }
-      if (j - entryIndex + 1 >= maxHold) {
-        exit = bar.close;
-        reason = "time";
-        break;
-      }
       exit = bar.close;
     }
+
+    // Mark the open position at each close so drawdown counts losses between exits.
+    for (let k = entryIndex; k <= exitIndex; k++) {
+      const marked =
+        equity * ((k === exitIndex ? exit : candles[k]!.close) / entry);
+      peak = Math.max(peak, marked);
+      maxDrawdown = Math.max(maxDrawdown, 1 - marked / peak);
+    }
+    equity *= exit / entry;
 
     const bars = exitIndex - entryIndex + 1;
     barsInMarket += bars;
@@ -101,23 +115,17 @@ export function runBacktest(
       returnPct: (exit / entry - 1) * 100,
       bars,
     });
-    i = exitIndex + 1;
-  }
-
-  let equity = 1;
-  let peak = 1;
-  let maxDrawdown = 0;
-  for (const t of trades) {
-    equity *= 1 + t.returnPct / 100;
-    peak = Math.max(peak, equity);
-    maxDrawdown = Math.max(maxDrawdown, 1 - equity / peak);
+    // Flat after the exit bar, so a BUY at its close can enter at the next open.
+    i = exitIndex;
   }
 
   const first = candles[0];
   const last = candles[candles.length - 1];
   return {
     trades,
-    winRate: trades.length ? trades.filter((t) => t.returnPct > 0).length / trades.length : 0,
+    winRate: trades.length
+      ? trades.filter((t) => t.returnPct > 0).length / trades.length
+      : 0,
     avgReturnPct: trades.length
       ? trades.reduce((sum, t) => sum + t.returnPct, 0) / trades.length
       : 0,
