@@ -48,7 +48,16 @@ describe("go-live review", () => {
     const day = 86_400;
     const candles = [0, 1, 2, 3].map((d) => ({ time: d * day }));
     // A fill mid-way through bar 2: its BUY came at the close of bar 1.
-    expect(windowStart(candles, (2 * day + 3600) * 1000)).toBe(1);
-    expect(windowStart(candles, -1)).toBe(0);
+    expect(windowStart(candles, (2 * day + 3600) * 1000, day)).toBe(1);
+    expect(windowStart(candles, -1, day)).toBe(0);
+    // A fill after the last bar ends (a weekend crypto fill against stock bars):
+    // that bar's BUY enters after the fill, the one before would not.
+    expect(
+      windowStart(
+        [0, 1].map((d) => ({ time: d * day })),
+        3 * day * 1000,
+        day,
+      ),
+    ).toBe(1);
   });
 });

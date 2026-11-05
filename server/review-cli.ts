@@ -84,7 +84,7 @@ for (const key of symbols) {
   const bars = await barsSince(symbol).catch(fail);
   const candles = closedBars(bars, barCloseSeconds(seconds!, !isCrypto(symbol)));
   const signals = deskSignal(candles, config.deskSignal.params);
-  const from = windowStart(candles, start);
+  const from = windowStart(candles, start, seconds!);
   const all = runBacktest(candles.slice(from), signals.slice(from)).trades;
   // Like paper, only closed trades count; one still open at the last bar is listed apart.
   const closed = all.filter((t) => t.reason !== "end");

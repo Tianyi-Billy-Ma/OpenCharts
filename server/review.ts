@@ -43,7 +43,11 @@ const FLAT = 1e-9;
 
 export const symbolKey = (symbol: string) => symbol.replace("/", "");
 
-/** Long-only round trips. Sells while flat (a position from before the window) are ignored. */
+/**
+ * Long-only round trips. Sells while flat (a position from before the window) are ignored.
+ * shortcut: fills are not adjusted for stock splits, so a trade held across a split is
+ * mis-scored; read SPLIT account activities if that ever happens.
+ */
 export function roundTrips(fills: Fill[]): {
   trades: PaperTrade[];
   open: string[];
@@ -115,12 +119,20 @@ export function summarize(trades: Array<Pick<Trade, "returnPct">>): Summary {
 }
 
 /**
- * Where the backtest window starts: the bar before the one holding the first
- * fill, so the BUY that set up that entry (filled at the next bar's open) is in.
+ * Where the backtest window starts. When a bar holds the first fill, start at
+ * the bar before it, so the BUY that set up that entry (filled at the next
+ * bar's open) is in. When the fill falls between bars (a weekend crypto fill
+ * against stock bars), start at the last bar, whose BUY enters after the fill.
  * Bars are stamped at their start, in seconds.
  */
-export function windowStart(candles: Array<{ time: number }>, firstFillMs: number): number {
-  let holding = -1;
-  for (let i = 0; i < candles.length && candles[i]!.time * 1000 <= firstFillMs; i++) holding = i;
-  return Math.max(0, holding - 1);
+export function windowStart(
+  candles: Array<{ time: number }>,
+  firstFillMs: number,
+  barSeconds: number,
+): number {
+  let last = -1;
+  for (let i = 0; i < candles.length && candles[i]!.time * 1000 <= firstFillMs; i++) last = i;
+  if (last < 0) return 0;
+  const holds = firstFillMs < (candles[last]!.time + barSeconds) * 1000;
+  return holds ? Math.max(0, last - 1) : last;
 }
