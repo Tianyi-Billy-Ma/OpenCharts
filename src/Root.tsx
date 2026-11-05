@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { createDemoAdapter } from "./adapter/demo.ts";
 import { OpenChartsProvider } from "./adapter/provider.tsx";
 import type { OpenChartsAdapter } from "./adapter/types.ts";
@@ -17,13 +17,22 @@ import { Terminal } from "./terminal/Terminal.tsx";
  * default bundle.
  */
 
-const adapterName = ["alpaca", "binance"].includes(import.meta.env.VITE_ADAPTER ?? "")
+const adapterName = ["alpaca", "binance"].includes(
+  import.meta.env.VITE_ADAPTER ?? "",
+)
   ? (import.meta.env.VITE_ADAPTER as "alpaca" | "binance")
   : null;
 
+// The PAPER/LIVE badge and signals log; backend-only, so kept out of the default bundle.
+const DeskBar = lazy(() =>
+  import("./desk/DeskBar.tsx").then((m) => ({ default: m.DeskBar })),
+);
+
 function loadAdapter(): Promise<OpenChartsAdapter> {
   if (adapterName === "alpaca") {
-    return import("./adapter/alpaca.ts").then(({ createAlpacaAdapter }) => createAlpacaAdapter());
+    return import("./adapter/alpaca.ts").then(({ loadAlpacaAdapter }) =>
+      loadAlpacaAdapter(),
+    );
   }
   return import("../examples/binance-adapter/binance-adapter.ts").then(
     ({ createBinancePaperAdapter }) => createBinancePaperAdapter(),
@@ -40,7 +49,10 @@ export function Root() {
     loadAdapter()
       .then(setAdapter)
       .catch((err: unknown) => {
-        console.error(`[opencharts] failed to load the ${adapterName} adapter; using the demo`, err);
+        console.error(
+          `[opencharts] failed to load the ${adapterName} adapter; using the demo`,
+          err,
+        );
         setAdapter(createDemoAdapter());
       });
   }, []);
@@ -48,7 +60,18 @@ export function Root() {
   if (!adapter) return null;
   return (
     <OpenChartsProvider adapter={adapter}>
-      <Terminal />
+      {adapterName === "alpaca" ? (
+        <div className="flex h-full flex-col">
+          <Suspense fallback={null}>
+            <DeskBar />
+          </Suspense>
+          <div className="min-h-0 flex-1">
+            <Terminal />
+          </div>
+        </div>
+      ) : (
+        <Terminal />
+      )}
     </OpenChartsProvider>
   );
 }

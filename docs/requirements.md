@@ -248,7 +248,7 @@ the browser never sees them.
 5. **M4, paper desk:** Alpaca paper trading end to end on both order paths,
    hard limits, journal and Sheets export. Shipped in two parts: M4a (journal,
    hard limits, our order tools, position guard) and M4b (paper trading and
-   the signals panel in the terminal, Sheets export).
+   the signals panel in the terminal, Sheets export, nginx deploy option).
 6. **M5, review:** 60 trading days of paper results vs backtest, then the
    go-live decision.
 

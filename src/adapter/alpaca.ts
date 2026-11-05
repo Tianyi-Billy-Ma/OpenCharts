@@ -1,6 +1,13 @@
-import type { Candle, Symbol } from "../services/schemas.ts";
+import type {
+  Account,
+  Candle,
+  Order,
+  Position,
+  Symbol,
+} from "../services/schemas.ts";
 import type {
   CandleRequest,
+  TradingGateway,
   ConnectionState,
   MarketDataSource,
   MarketEvent,
@@ -14,7 +21,8 @@ import type {
  *
  * The browser never talks to Alpaca and never sees the keys: it calls the
  * backend's `/api/*` routes, and live prices arrive as Server-Sent Events
- * from `/api/stream`. Read-only for now; trading is added in a later step.
+ * from `/api/stream`. Trading goes through `/api/trading/*`, where the backend
+ * applies the desk's rules (approval, stop, hard limits) to every order.
  */
 
 export interface AlpacaAdapterOptions {
@@ -25,7 +33,10 @@ export interface AlpacaAdapterOptions {
 }
 
 /** Split an SSE buffer into complete `data:` payloads and the unfinished rest. */
-export function parseSseChunk(buffer: string): { events: string[]; rest: string } {
+export function parseSseChunk(buffer: string): {
+  events: string[];
+  rest: string;
+} {
   const blocks = buffer.split("\n\n");
   const rest = blocks.pop() ?? "";
   const events = blocks
@@ -40,7 +51,9 @@ export function parseSseChunk(buffer: string): { events: string[]; rest: string 
   return { events, rest };
 }
 
-export function createAlpacaMarketData(options: AlpacaAdapterOptions = {}): MarketDataSource {
+export function createAlpacaMarketData(
+  options: AlpacaAdapterOptions = {},
+): MarketDataSource {
   const base = (options.baseUrl ?? "").replace(/\/$/, "");
   const doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
 
@@ -76,8 +89,12 @@ export function createAlpacaMarketData(options: AlpacaAdapterOptions = {}): Mark
   const getJson = async <T>(path: string): Promise<T> => {
     const response = await doFetch(`${base}${path}`);
     if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      throw new Error(body?.error ?? `Backend ${response.status} ${response.statusText}`);
+      const body = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      throw new Error(
+        body?.error ?? `Backend ${response.status} ${response.statusText}`,
+      );
     }
     return (await response.json()) as T;
   };
@@ -95,8 +112,11 @@ export function createAlpacaMarketData(options: AlpacaAdapterOptions = {}): Mark
     abort = controller;
     setState(attempt === 0 ? "connecting" : "reconnecting");
     try {
-      const response = await doFetch(`${base}/api/stream`, { signal: controller.signal });
-      if (!response.ok || !response.body) throw new Error(`stream ${response.status}`);
+      const response = await doFetch(`${base}/api/stream`, {
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body)
+        throw new Error(`stream ${response.status}`);
       attempt = 0;
       setState("connected");
 
@@ -130,7 +150,10 @@ export function createAlpacaMarketData(options: AlpacaAdapterOptions = {}): Mark
     getSymbols: () => getJson<Symbol[]>("/api/symbols"),
 
     getCandles: (request: CandleRequest) => {
-      const params = new URLSearchParams({ symbol: request.symbol, timeframe: request.timeframe });
+      const params = new URLSearchParams({
+        symbol: request.symbol,
+        timeframe: request.timeframe,
+      });
       if (request.limit != null) params.set("limit", String(request.limit));
       if (request.fromMs != null) params.set("fromMs", String(request.fromMs));
       if (request.toMs != null) params.set("toMs", String(request.toMs));
@@ -138,7 +161,9 @@ export function createAlpacaMarketData(options: AlpacaAdapterOptions = {}): Mark
     },
 
     getQuote: (symbol: string) =>
-      getJson<Quote | null>(`/api/quote?symbol=${encodeURIComponent(symbol)}`).catch(() => null),
+      getJson<Quote | null>(
+        `/api/quote?symbol=${encodeURIComponent(symbol)}`,
+      ).catch(() => null),
 
     subscribe: (handler: (event: MarketEvent) => void): Unsubscribe => {
       handlers.add(handler);
@@ -172,6 +197,269 @@ export function createAlpacaMarketData(options: AlpacaAdapterOptions = {}): Mark
   };
 }
 
-export function createAlpacaAdapter(options: AlpacaAdapterOptions = {}): OpenChartsAdapter {
-  return { name: "alpaca", marketData: createAlpacaMarketData(options) };
+/** What the backend returns; see server/alpaca.ts. */
+interface BackendAccount {
+  mode: "paper" | "live";
+  ordersEnabled: boolean;
+  equity: number;
+  lastEquity: number;
+  buyingPower: number;
+}
+interface BackendPosition {
+  symbol: string;
+  qty: number;
+  avgEntryPrice: number;
+  currentPrice: number;
+  unrealizedPl: number;
+}
+interface BackendOrder {
+  id: string;
+  symbol: string;
+  side: "buy" | "sell";
+  type: string;
+  qty: number;
+  filledQty: number;
+  status: string;
+  stopPrice: number | null;
+  limitPrice: number | null;
+  orderClass: string;
+}
+interface BackendOrderResult {
+  ok: boolean;
+  rejected: string[];
+  orders: BackendOrder[];
+  note?: string;
+}
+
+/** One Alpaca account per backend, so a fixed id is enough. */
+const ACCOUNT_POLL_MS = 15_000;
+
+export const ALPACA_ACCOUNT_ID = "00000000-0000-4000-8000-00000000a1ac";
+
+const terminalName = (symbol: string) => symbol.replace("/", "");
+
+function toOrder(o: BackendOrder): Order {
+  const now = new Date().toISOString();
+  return {
+    id: o.id,
+    accountId: ALPACA_ACCOUNT_ID,
+    symbolName: terminalName(o.symbol),
+    side: o.side === "buy" ? "BUY" : "SELL",
+    type:
+      o.type === "market" ? "MARKET" : o.type === "limit" ? "LIMIT" : "STOP",
+    quantity: o.qty,
+    price: o.limitPrice,
+    stopPrice: o.stopPrice,
+    takeProfit: null,
+    stopLoss: null,
+    // Everything the backend lists is still working.
+    status: "NEW",
+    filledQuantity: o.filledQty,
+    avgFillPrice: null,
+    comment: o.orderClass || null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createAlpacaTrading(
+  options: AlpacaAdapterOptions = {},
+): TradingGateway {
+  const base = (options.baseUrl ?? "").replace(/\/$/, "");
+  const doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+
+  const call = async <T>(path: string, body?: unknown): Promise<T> => {
+    const response = await doFetch(`${base}/api/trading${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers:
+        body === undefined
+          ? {}
+          : { "content-type": "application/json", "x-opencharts": "1" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const json = (await response.json().catch(() => null)) as
+      | (T & { error?: string; rejected?: string[] })
+      | null;
+    if (!response.ok) {
+      throw new Error(
+        json?.rejected?.join("; ") ||
+          json?.error ||
+          `Backend ${response.status} ${response.statusText}`,
+      );
+    }
+    return json as T;
+  };
+  const orders = () => call<BackendOrder[]>("/orders");
+
+  return {
+    async getAccounts(): Promise<Account[]> {
+      const a = await call<BackendAccount>("/account");
+      const now = new Date().toISOString();
+      const label = `Alpaca ${a.mode.toUpperCase()}`;
+      return [
+        {
+          id: ALPACA_ACCOUNT_ID,
+          userId: "owner",
+          templateId: "alpaca",
+          label,
+          status: "ACTIVE",
+          balance: a.equity,
+          equity: a.equity,
+          margin: 0,
+          freeMargin: a.buyingPower,
+          phase: a.mode.toUpperCase(),
+          startDate: now,
+          createdAt: now,
+          updatedAt: now,
+          isHftMode: false,
+          template: {
+            name: label,
+            startingBalance: a.lastEquity,
+            instrumentType: "EQUITIES",
+          },
+        },
+      ];
+    },
+
+    async getPositions(): Promise<Position[]> {
+      const [positions, open] = await Promise.all([
+        call<BackendPosition[]>("/positions"),
+        orders(),
+      ]);
+      return positions.map((p) => {
+        const name = terminalName(p.symbol);
+        const exits = open.filter(
+          // Held legs belong to an entry that has not filled yet; they protect nothing.
+          (o) =>
+            o.side === "sell" &&
+            o.status !== "held" &&
+            terminalName(o.symbol) === name,
+        );
+        const stop = exits.find((o) => o.stopPrice != null);
+        const target = exits.find((o) => o.type === "limit");
+        return {
+          id: name,
+          accountId: ALPACA_ACCOUNT_ID,
+          symbolName: name,
+          side: "LONG",
+          quantity: p.qty,
+          entryPrice: p.avgEntryPrice,
+          currentPrice: p.currentPrice,
+          unrealizedPnl: p.unrealizedPl,
+          margin: 0,
+          contractSize: 1,
+          // Alpaca's position has no open time.
+          openedAt: new Date().toISOString(),
+          takeProfit: target?.limitPrice ?? null,
+          stopLoss: stop?.stopPrice ?? null,
+        };
+      });
+    },
+
+    getOrders: async () => (await orders()).map(toOrder),
+
+    getClosedPositions: async (_accountId, page = 1) => ({
+      data: [],
+      total: 0,
+      page,
+      pageSize: 50,
+      totalPages: 0,
+    }),
+
+    async placeOrder(input) {
+      if (input.side === "SELL")
+        throw new Error(
+          "This desk is long only. Close a position from the Positions table.",
+        );
+      if (input.type !== "MARKET")
+        throw new Error(
+          "Only market orders: stocks go in as a GTC bracket with your stop.",
+        );
+      const result = await call<BackendOrderResult>("/orders", {
+        ticker: input.symbol,
+        side: "buy",
+        qty: input.quantity,
+        stop: input.stopLoss,
+        target: input.takeProfit,
+      });
+      const first = result.orders[0];
+      if (!first) throw new Error(result.note ?? "The backend placed no order");
+      return toOrder(first);
+    },
+
+    modifyOrder: () =>
+      Promise.reject(new Error("Changing an order is not supported yet.")),
+    modifyPosition: () =>
+      Promise.reject(
+        new Error("Changing a stop or target is not supported yet."),
+      ),
+
+    async cancelOrder(orderId) {
+      await call(`/orders/${encodeURIComponent(orderId)}/cancel`, {});
+    },
+    async cancelAllOrders() {
+      for (const o of await orders()) {
+        // Partly filled entries are refused by the backend (their stop would go too).
+        if (o.side === "buy" && o.filledQty === 0)
+          await call(`/orders/${encodeURIComponent(o.id)}/cancel`, {});
+      }
+    },
+
+    async closePosition(positionId, quantity) {
+      if (quantity != null) {
+        const held = (await call<BackendPosition[]>("/positions")).find(
+          (p) => terminalName(p.symbol) === positionId,
+        );
+        if (held && quantity < held.qty)
+          throw new Error(
+            "Partial closes are not supported. Close the whole position.",
+          );
+      }
+      await call(`/positions/${encodeURIComponent(positionId)}/close`, {});
+    },
+    async closeAllPositions() {
+      for (const p of await call<BackendPosition[]>("/positions"))
+        await call(
+          `/positions/${encodeURIComponent(terminalName(p.symbol))}/close`,
+          {},
+        );
+    },
+
+    // shortcut: polls instead of pushing; positions and orders re-sync on the terminal's own 30s timer.
+    subscribe(handler) {
+      const poll = () =>
+        call<BackendAccount>("/account")
+          .then((a) =>
+            handler({
+              type: "account.updated",
+              accountId: ALPACA_ACCOUNT_ID,
+              equity: a.equity,
+              balance: a.equity,
+              freeMargin: a.buyingPower,
+              marginUsed: 0,
+            }),
+          )
+          .catch(() => {}); // the next poll tries again
+      const id = setInterval(poll, ACCOUNT_POLL_MS);
+      return () => clearInterval(id);
+    },
+  };
+}
+
+export function createAlpacaAdapter(
+  options: AlpacaAdapterOptions & { trading?: boolean } = {},
+): OpenChartsAdapter {
+  return {
+    name: "alpaca",
+    marketData: createAlpacaMarketData(options),
+    ...(options.trading && { trading: createAlpacaTrading(options) }),
+  };
+}
+
+/** The adapter, with trading only when the backend has an Alpaca account behind it. */
+export async function loadAlpacaAdapter(options: AlpacaAdapterOptions = {}) {
+  const doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const base = (options.baseUrl ?? "").replace(/\/$/, "");
+  const probe = await doFetch(`${base}/api/trading/account`).catch(() => null);
+  return createAlpacaAdapter({ ...options, trading: probe?.ok === true });
 }

@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { DEFAULT_DESK_SIGNAL_PARAMS, type DeskSignalParams } from "../src/lib/desk-signal.ts";
+import {
+  DEFAULT_DESK_SIGNAL_PARAMS,
+  type DeskSignalParams,
+} from "../src/lib/desk-signal.ts";
 
 /**
  * Everything user-specific lives in `opencharts.config.ts` at the repo root.
@@ -53,6 +56,12 @@ export interface OpenChartsConfig {
     /** Stop distance in ATRs when the journal has no planned stop. */
     fallbackStopAtr: number;
   };
+  /** Google Sheets copy of the journal; on when OPENCHARTS_SHEETS_ID is set in .env. */
+  sheets: {
+    /** Tab the export owns and rewrites. Never a tab people or bots write to. */
+    tab: string;
+    everyMinutes: number;
+  };
   /** SQLite file for approvals, signals and the journal. */
   dataPath: string;
 }
@@ -61,7 +70,17 @@ export const DEFAULT_CONFIG: OpenChartsConfig = {
   port: 8787,
   host: "127.0.0.1",
   watchlist: {
-    stocks: ["NVDA", "MSFT", "GOOGL", "AMZN", "META", "AMD", "AVGO", "TSM", "PLTR"],
+    stocks: [
+      "NVDA",
+      "MSFT",
+      "GOOGL",
+      "AMZN",
+      "META",
+      "AMD",
+      "AVGO",
+      "TSM",
+      "PLTR",
+    ],
     crypto: ["BTC/USD", "ETH/USD", "SOL/USD"],
   },
   deskSignal: { timeframe: "1d", params: DEFAULT_DESK_SIGNAL_PARAMS },
@@ -69,16 +88,29 @@ export const DEFAULT_CONFIG: OpenChartsConfig = {
   scanner: { enabled: true, everyMinutes: 5, settleMinutes: 10 },
   limits: { maxPositionPct: 10, maxOpenPositions: 5, dailyLossPct: 2 },
   orders: { enabled: false },
-  guard: { enabled: true, everyMinutes: 5, missingStop: "place", fallbackStopAtr: 2 },
+  guard: {
+    enabled: true,
+    everyMinutes: 5,
+    missingStop: "place",
+    fallbackStopAtr: 2,
+  },
+  sheets: { tab: "OpenCharts Journal", everyMinutes: 15 },
   dataPath: "data/opencharts.db",
 };
 
 /** Load `opencharts.config.ts` (or the path in OPENCHARTS_CONFIG) over the defaults. */
-export async function loadConfig(path = process.env.OPENCHARTS_CONFIG): Promise<OpenChartsConfig> {
+export async function loadConfig(
+  path = process.env.OPENCHARTS_CONFIG,
+): Promise<OpenChartsConfig> {
   const file = resolve(path ?? "opencharts.config.ts");
   if (!existsSync(file)) return DEFAULT_CONFIG;
-  const mod = (await import(pathToFileURL(file).href)) as { default?: Partial<OpenChartsConfig> };
-  const user = (mod.default ?? {}) as Omit<Partial<OpenChartsConfig>, "deskSignal"> & {
+  const mod = (await import(pathToFileURL(file).href)) as {
+    default?: Partial<OpenChartsConfig>;
+  };
+  const user = (mod.default ?? {}) as Omit<
+    Partial<OpenChartsConfig>,
+    "deskSignal"
+  > & {
     deskSignal?: { timeframe?: string; params?: Partial<DeskSignalParams> };
   };
   return {
@@ -90,9 +122,14 @@ export async function loadConfig(path = process.env.OPENCHARTS_CONFIG): Promise<
     limits: { ...DEFAULT_CONFIG.limits, ...user.limits },
     orders: { ...DEFAULT_CONFIG.orders, ...user.orders },
     guard: { ...DEFAULT_CONFIG.guard, ...user.guard },
+    sheets: { ...DEFAULT_CONFIG.sheets, ...user.sheets },
     deskSignal: {
-      timeframe: user.deskSignal?.timeframe ?? DEFAULT_CONFIG.deskSignal.timeframe,
-      params: { ...DEFAULT_CONFIG.deskSignal.params, ...user.deskSignal?.params },
+      timeframe:
+        user.deskSignal?.timeframe ?? DEFAULT_CONFIG.deskSignal.timeframe,
+      params: {
+        ...DEFAULT_CONFIG.deskSignal.params,
+        ...user.deskSignal?.params,
+      },
     },
   };
 }

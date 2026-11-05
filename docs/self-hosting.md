@@ -70,7 +70,7 @@ limited to your own email. Do not open the port to the internet directly.
 
 ## API
 
-The backend's routes, all `GET`:
+The backend's read routes, all `GET`:
 
 | Route | Returns |
 | --- | --- |
@@ -82,6 +82,12 @@ The backend's routes, all `GET`:
 | `/api/desk-signal?symbol[&timeframe][&limit]` | Desk Signal per closed bar: trend, BUY/SELL, swing zones, EMAs, RSI, ATR |
 | `/api/journal.csv` | The whole journal as CSV |
 | `/api/signals[?symbol]` | The 50 latest signals the scanner recorded, with webhook status |
+| `/api/trading/account`, `/api/trading/positions`, `/api/trading/orders` | The Alpaca account the terminal trades, when keys are set |
+
+The terminal's order routes are `POST /api/trading/orders`,
+`POST /api/trading/orders/:id/cancel` and `POST /api/trading/positions/:symbol/close`.
+They need the `x-opencharts: 1` header, which a page on another site cannot
+send, and `orders.enabled`.
 
 ## Desk Signal
 
@@ -219,15 +225,21 @@ you give it live keys. These safety features work whichever order path you use.
   - `place_order` checks for a live approval, a stop below the price, whole shares for stocks, and the hard limits. It also refuses when the guard has entries blocked.
   - Stocks go in as GTC market brackets, or OTO orders when there is no target. Crypto is a market buy, then a separate GTC stop-limit sell, because Alpaca has no crypto brackets.
   - `place_order` with `side: "sell"` closes the whole position. It never shorts.
+- **Trading from the terminal:** the bar above the chart shows `PAPER` or `LIVE`, so you always know where orders go.
+  - Orders use the same order path and checks as `place_order`, and are journaled with agent `terminal`. So a BUY needs a Risk Officer approval and a stop loss, and the terminal is read-only until `orders.enabled` is on.
+  - Only market BUYs. Close a position to sell it; partial closes, shorts and editing stops are not supported. Stops and targets cannot be cancelled on their own.
+- **Signals panel:** the **Signals** button above the chart lists the latest Desk Signals and whether each webhook went out.
 - **Journal:** approvals, signals, webhooks, orders (placed or rejected), guard stops and alerts are all logged with time, agent, ticker, action, size, entry, stop, target, reason, evidence and outcome.
   - Bots add ideas, rejections and notes with `add_journal_entry`.
   - After an order placed through Alpaca's official MCP, the Trader should log `action: "plan"` with the stop, so the guard can restore it.
   - Download everything with `GET /api/journal.csv`.
+  - **Google Sheets copy (optional):** set `OPENCHARTS_SHEETS_ID` and `GOOGLE_SERVICE_ACCOUNT_JSON` in `.env`, and share the sheet with the service account's email as an Editor. Every 15 minutes (`sheets.everyMinutes`) the backend rewrites its own tab, `OpenCharts Journal` by default (`sheets.tab`). It creates the tab if needed and never writes to any other tab, so bots can keep their own tab in the same sheet. Text is written as plain values, never formulas. `npm run doctor` checks the access.
 
 ## Deploying
 
 See [deploy.md](deploy.md) to run the backend as a systemd service behind
-Cloudflare Tunnel, with the terminal behind Cloudflare Access and `/mcp` on its own hostname.
+Cloudflare Tunnel, or behind nginx on another server, with the terminal behind
+Cloudflare Access and `/mcp` on its own hostname.
 
 ## Known limits
 
@@ -235,5 +247,4 @@ Cloudflare Tunnel, with the terminal behind Cloudflare Access and `/mcp` on its 
   track the market closely; volume is much lower than the consolidated tape.
 - The free plan allows one live stream connection per feed, so run one backend
   per set of keys.
-- The terminal itself is read-only for now. Bots can trade through the MCP
-  tools. Trading from the terminal comes in a later milestone.
+- The terminal has no trade history for Alpaca yet; closed trades are in the journal.
