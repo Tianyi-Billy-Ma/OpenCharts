@@ -1,11 +1,12 @@
 # Requirements: OpenCharts as a free, self-hosted trading desk for AI agents
 
-Status: draft v0.2 (2026-11-05). Owner: Billy.
+Status: draft v0.3 (2026-11-05). Owner: Billy.
 
-Changes from v0.1: the open questions are answered (section 9), the project is
-scoped as an open-source app anyone can self-host (section 2), Billy's own setup
-moves to a reference deployment (section 7), and the terminal gets a read-only
-public viewing mode for a personal domain (section 5.3).
+Changes from v0.2 (after a review with Billy): the backend is TypeScript and
+reuses the frontend's indicators, Desk Signal runs on closed bars only, the
+Risk Officer approves tickers through MCP, the backtest is part of the backend,
+and the public viewer mode is dropped because the whole site sits behind
+Cloudflare Access. All decisions are listed in section 9.
 
 ## 1. Background
 
@@ -37,11 +38,11 @@ for anyone who wants a free charting terminal and MCP server for their own AI
 agents. That means:
 
 1. **Ten-minute quickstart.** A new user with only free Alpaca paper keys runs
-   one command (`docker compose up`, or `uv run` plus `npm run build`) and sees
+   one command (`docker compose up`, or `npm run build && npm run server`) and sees
    live charts. No other account, domain or tunnel is needed to try it.
 2. **One config file.** Everything user-specific lives in `opencharts.yaml`
-   (watchlist, Desk Signal parameters, risk limits, webhook targets, viewing
-   mode) plus a `.env` for secrets. Nothing personal is hard-coded: no host
+   (watchlist, Desk Signal parameters and timeframe, approval length, risk
+   limits, webhook targets) plus a `.env` for secrets. Nothing personal is hard-coded: no host
    names, domains, bot names or file paths from Billy's setup.
 3. **Agent-agnostic.** The MCP server works with any MCP client (Grok Bot,
    Claude, others). Webhooks are plain HTTP POSTs with a configurable body
@@ -63,8 +64,7 @@ agents. That means:
 3. The "Desk Signal" entry trigger from the post, computed server-side.
 4. A webhook push that wakes the Trader bot when Desk Signal fires on an
    approved ticker.
-5. A read-only viewing mode so the terminal can be shown on a public domain.
-6. Paper trading first. Live trading only after the go-live gate.
+5. Paper trading first. Live trading only after the go-live gate.
 
 ## 4. Non-goals (for now)
 
@@ -103,23 +103,36 @@ exposure. If either company lists, add it to the watchlist.
 
 ### 5.3 Backend service (new, in this repo)
 
-A small Python service (managed with `uv`, also shipped as a Docker image). It
-is the only component that holds broker keys; the browser never sees them.
+A small Node service written in TypeScript, in the `server/` folder of this
+repository and shipped with it (also as a Docker image). It reuses the
+frontend's indicator code (`src/lib/indicators.ts`), so the chart and the bots
+always see the same numbers. It is the only component that holds broker keys;
+the browser never sees them.
 
 - **Market data proxy** for the web terminal: symbols, candles (seconds,
   oldest first, `toMs` exclusive, per the adapter contract), and a live tick
   stream (Alpaca websocket relayed over our own websocket).
-- **Indicators**: SMA, EMA, RSI, MACD, ATR, Bollinger, volume vs average,
-  swing highs and lows.
+- **Indicators**: SMA, EMA, RSI, MACD, ATR, Bollinger (already in
+  `src/lib/indicators.ts`), plus volume vs average and swing highs and lows
+  (new, added to the same file).
 - **Desk Signal** (from the post; every number is a config default):
   - Trend: EMA 8, 21, 50, 200; bullish when stacked in that order, bearish when reversed.
   - BUY: close above the 20-bar high, volume at least 1.5x its 20-bar average, RSI(14) above 50.
   - SELL: the exact opposite.
   - Zones: last confirmed swing high and swing low.
   - Filter: no signal when ATR(14) is in its top 10% of the last 100 bars.
+  - **Closed bars only** ("bar close confirmation"). A bar that is still open
+    can cross a level and fall back before it closes, which gives a false
+    signal that the backtest would never show. Default timeframe: daily.
+    Configurable (for example 4h or 1h), always evaluated after the bar closes.
 - **Screener**: filter the watchlist or a universe by price, volume, trend and RSI.
-- **Signal scanner**: every 15 minutes in market hours (crypto 24/7), run Desk
-  Signal on the watchlist and record new signals.
+- **Signal scanner**: runs after each bar closes. With daily bars: after the US
+  close (16:00 New York, a few minutes later so the final bar is published) for
+  stocks, and at 00:00 UTC for crypto. Records new signals.
+- **Approvals**: the Risk Officer approves or revokes tickers through MCP. An
+  approval lasts 5 trading days by default (configurable), can be renewed, and
+  can be revoked at any time. Webhooks fire only for tickers with a live
+  approval.
 - **Webhook sender**: on a new BUY or SELL for an approved ticker, POST to each
   configured webhook.
   - Default body: the Grok Bot HANDOFF format `TICKER | IDEA | EVIDENCE | NEXT STEP`.
@@ -128,11 +141,17 @@ is the only component that holds broker keys; the browser never sees them.
   - Signed with an HMAC header so receivers can verify it came from us.
 - **MCP server** (Streamable HTTP, bearer-token auth) exposing:
   `get_bars`, `get_quote`, `get_indicators`, `desk_signal`, `screen`,
-  `get_news`, `get_events`, `list_signals`, `get_positions`.
+  `get_news`, `get_events`, `list_signals`, `get_positions`, plus the write
+  tools `set_approval(ticker, until?)` and `revoke_approval(ticker)`, which only
+  the Risk Officer's token may call.
   Order tools (`place_order`, `cancel_order`) exist but are off by default;
   see 5.5.
-- **Storage**: SQLite. It is the source of truth for signals, the journal,
-  drawings and settings.
+- **Storage**: SQLite. It is the source of truth for signals, approvals, the
+  journal, drawings and settings.
+- **Backtest**: a command-line tool in the backend (`npm run backtest NVDA`)
+  that runs the same Desk Signal code, on the same configured timeframe, over
+  Alpaca's free historical bars (3+ years). The go-live gate compares paper
+  results with a backtest on the timeframe actually traded.
 
 ### 5.4 Web terminal (this fork)
 
@@ -145,12 +164,9 @@ is the only component that holds broker keys; the browser never sees them.
 - Show Desk Signal on the chart: EMA ribbon, BUY and SELL markers, swing zones.
 - A signals panel listing recent Desk Signal events and whether a webhook was sent.
 - Default to the Alpaca paper account; the UI must clearly show PAPER vs LIVE.
-- **Two modes**, set in config:
-  - `owner`: full terminal, including order tickets and settings. Requires login.
-  - `viewer` (for a public domain): charts, signals, and optionally positions
-    and P&L. No order buttons, no settings, no account numbers or keys. The
-    backend enforces this, not only the UI: in viewer mode it serves read-only
-    routes and refuses everything else.
+- The terminal has no login of its own. It is meant for its owner only: run it
+  on localhost, or put it behind an auth gate (we document Cloudflare Access).
+  The docs must say clearly not to expose it without one.
 
 ### 5.5 Trading and safety
 
@@ -162,10 +178,25 @@ is the only component that holds broker keys; the browser never sees them.
 - No bot other than the Trader gets order tools, on either path.
 - Every order carries a stop-loss at placement (Alpaca bracket orders), so
   exits do not depend on any bot or webhook.
+- Timing: stock signals arrive after the close, so the Trader places a GTC
+  (good-till-canceled) market bracket order. Alpaca queues it, it fills at the
+  next open, and the stop and target legs stay live for the whole 2 to 10 day
+  hold. A DAY bracket would drop its exits after the first session, so it is
+  not allowed.
+- Crypto trades 24/7, so it is ordered right away. Alpaca does not offer
+  bracket orders for crypto, so the stop is placed as a separate stop-limit
+  order (the only stop type Alpaca supports for crypto) right after the fill.
+- **Position guard**: a backend job, separate from the daily signal scanner,
+  runs every 5 minutes (24/7) and on backend start. It checks every open
+  position against Alpaca's open orders. If a position has no live stop, the
+  guard places one itself from the journal's planned stop, or from a default
+  ATR stop if no plan exists. If placing it fails twice, the guard alerts the
+  owner and blocks new entries on our order path until it is resolved.
+  Optionally (config `missing_stop: flatten`), it closes the position instead.
 - Hard limits (max position size, max open positions, daily loss stop) are set
   in `opencharts.yaml`. Our order path rejects orders that break them. On the
-  official-MCP path we cannot block orders, so the scanner checks positions
-  against the limits every run and alerts on a breach.
+  official-MCP path we cannot block orders, so the position guard checks
+  positions against the limits every run and alerts on a breach.
 - Secrets (broker keys, webhook secrets, MCP token) live only in `.env` (mode
   600) or the user's secret manager. Never in git, logs, chat, the journal, or
   any bot's machine.
@@ -184,7 +215,7 @@ is the only component that holds broker keys; the browser never sees them.
 ## 6. Deployment (generic)
 
 - One host runs the backend, which also serves the static frontend build.
-- Supported: Docker Compose, or a systemd user service with `uv`.
+- Supported: Docker Compose, or a systemd user service running Node.
 - The backend binds to localhost. Public access, if any, goes through a tunnel
   or reverse proxy the user chooses; we document Cloudflare Tunnel.
 - The webhook sender only makes outbound calls.
@@ -194,9 +225,8 @@ is the only component that holds broker keys; the browser never sees them.
 - **Host:** nd-work2, systemd user service.
 - **Exposure:** Cloudflare Tunnel on tianyi-billy-ma.com, so no inbound port is
   opened on nd-work2.
-  - `charts.tianyi-billy-ma.com`: the terminal in `viewer` mode, public.
-  - `desk.tianyi-billy-ma.com`: the terminal in `owner` mode, behind
-    Cloudflare Access (free tier, Billy's email only).
+  - `charts.tianyi-billy-ma.com`: the terminal, behind Cloudflare Access
+    (free tier, Billy's email only).
   - `mcp.tianyi-billy-ma.com`: the MCP endpoint for Grok Bot, bearer token
     required.
 - **Orders:** Alpaca's official MCP, used only by the Trader bot.
@@ -211,14 +241,14 @@ is the only component that holds broker keys; the browser never sees them.
    real Alpaca stocks and crypto; config file and Docker quickstart.
 3. **M2, signals:** indicators + Desk Signal in the backend and on the chart;
    backtest Desk Signal on 3+ years.
-4. **M3, bots:** MCP server + signal scanner + webhooks; viewer mode; deploy to
+4. **M3, bots:** MCP server + approvals + signal scanner + webhooks; deploy to
    nd-work2 behind the tunnel.
 5. **M4, paper desk:** Alpaca paper trading end to end on both order paths,
    hard limits, journal and Sheets export.
 6. **M5, review:** 60 trading days of paper results vs backtest, then the
    go-live decision.
 
-## 9. Decisions (closed questions from v0.1)
+## 9. Decisions
 
 1. **How Grok Bot reaches the MCP server:** Cloudflare Tunnel on an existing
    domain, at `mcp.tianyi-billy-ma.com`.
@@ -227,8 +257,18 @@ is the only component that holds broker keys; the browser never sees them.
 3. **Order path:** Alpaca's official MCP for Billy's desk. Our own order tools
    are also built, off by default (section 5.5).
 4. **Journal source of truth:** the backend database. Google Sheets is an export.
+5. **Backend language:** TypeScript, reusing `src/lib/indicators.ts`.
+6. **Signal timing:** closed bars only, daily by default, timeframe configurable.
+7. **Approvals:** MCP write tools for the Risk Officer, 5 trading days by default.
+8. **Limits on the official-MCP path:** alerts after the fact are accepted; both
+   order paths are built.
+9. **Public view:** none. The whole site is behind Cloudflare Access.
+10. **Backtest:** a CLI in the backend, using the same Desk Signal code.
+11. **Code location:** the backend lives in `server/` in this repository.
+12. **Order timing:** GTC market bracket orders after the close for stocks;
+    crypto ordered right away with a separate stop, backed by the position
+    guard.
 
 ## 10. Open questions
 
-1. Should viewer mode on the public domain show positions and P&L, or charts
-   and signals only? Default: charts and signals only.
+None right now.
