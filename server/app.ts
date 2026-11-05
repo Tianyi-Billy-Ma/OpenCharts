@@ -5,7 +5,8 @@ import type { Symbol } from "../src/services/schemas.ts";
 import { isCrypto, type AlpacaQuote, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import { deskSignalBars } from "./desk-tools.ts";
-import type { Store } from "./store.ts";
+import type { GuardStatus } from "./guard.ts";
+import { journalCsv, type Store } from "./store.ts";
 
 /**
  * The OpenCharts backend's HTTP surface. The browser talks only to this; the
@@ -17,6 +18,7 @@ import type { Store } from "./store.ts";
  *   GET /api/quote?symbol
  *   GET /api/stream                  Server-Sent Events: {"type":"tick",...}
  *   GET /api/desk-signal?symbol[&timeframe][&limit]   Desk Signal on closed bars, newest last
+ *   GET /api/journal.csv             the desk journal, oldest first
  *   GET /api/signals[?symbol]        recent Desk Signal events and their webhook status
  *   POST /mcp                        MCP server for the desk's bots (see mcp.ts), when tokens are set
  *
@@ -30,7 +32,9 @@ export interface AppOptions {
   /** Built frontend to serve. Skipped when the folder is missing. */
   staticDir?: string;
   /** Signals for /api/signals. Unset: an empty list. */
-  store?: Pick<Store, "listSignals">;
+  store?: Pick<Store, "listSignals" | "listJournal">;
+  /** Position guard status for /api/health. */
+  guardStatus?: () => GuardStatus;
   /** Handles POST /mcp. Unset: /mcp answers 404. */
   mcp?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 }
@@ -135,7 +139,23 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
 
     switch (url.pathname) {
       case "/api/health":
-        return sendJson(res, 200, { ok: true, keys: hasKeys, symbols: symbols.length });
+        return sendJson(res, 200, {
+          ok: true,
+          keys: hasKeys,
+          symbols: symbols.length,
+          guard: options.guardStatus?.() ?? null,
+        });
+
+      case "/api/journal.csv": {
+        // shortcut: exports the latest 100,000 rows; page it if a journal ever grows past that.
+        const csv = journalCsv(options.store?.listJournal({ limit: 100_000 }) ?? []);
+        res.writeHead(200, {
+          "content-type": "text/csv; charset=utf-8",
+          "content-disposition": 'attachment; filename="opencharts-journal.csv"',
+          "cache-control": "no-store",
+        });
+        return res.end(csv);
+      }
 
       case "/api/symbols":
         return sendJson(res, 200, symbols);

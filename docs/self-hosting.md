@@ -18,6 +18,17 @@ cp .env.example .env
 ```
 
 Put your key ID and secret in `.env`. Never commit it (it is in `.gitignore`).
+The names Alpaca's own tools use (`ALPACA_API_KEY`, `APCA_API_KEY_ID`,
+`APCA_API_SECRET_KEY`) work too. OpenCharts always trades on the paper
+account, whatever base URL is set.
+
+With a secret manager instead of `.env`, pass the secrets in at start, e.g.
+1Password: `op run --env-file=.env.op -- npm run server`, where `.env.op`
+holds references like `ALPACA_KEY_ID=op://<vault>/<item>/<field>`.
+
+Check the setup with `npm run doctor` (or `op run --env-file=.env.op -- npm run doctor`).
+It reaches the Alpaca paper account, checks each MCP token, and sends a signed
+test webhook, without printing any secret.
 
 Edit `opencharts.config.ts` to change the watchlist or the port. Stocks use
 plain tickers (`"NVDA"`); crypto uses Alpaca pairs (`"BTC/USD"`), shown in the
@@ -69,6 +80,7 @@ The backend's routes, all `GET`:
 | `/api/quote?symbol` | Latest bid and ask |
 | `/api/stream` | Server-Sent Events, one `{"type":"tick",...}` per quote |
 | `/api/desk-signal?symbol[&timeframe][&limit]` | Desk Signal per closed bar: trend, BUY/SELL, swing zones, EMAs, RSI, ATR |
+| `/api/journal.csv` | The whole journal as CSV |
 | `/api/signals[?symbol]` | The 50 latest signals the scanner recorded, with webhook status |
 
 ## Desk Signal
@@ -114,6 +126,10 @@ are refused.
 | `list_signals` | any | Signals the scanner recorded, and whether each webhook went out |
 | `get_events` | any | Upcoming FOMC decisions and CPI releases |
 | `list_approvals` | any | Live approvals and when each ends |
+| `add_journal_entry` | any | Log an idea, rejection, plan or note |
+| `list_journal` | any | Journal rows, newest first |
+| `place_order` | trader | Long-only order with the checks above (only when `orders.enabled`) |
+| `cancel_order` | trader | Cancel an open order (only when `orders.enabled`) |
 | `set_approval(ticker, until?)` | risk | Approve a watchlist ticker; 5 trading days unless `until` is given; calling again renews |
 | `revoke_approval(ticker)` | risk | End an approval now |
 
@@ -176,8 +192,37 @@ function verify(req, rawBody, secret) {
 }
 ```
 
+To try webhooks locally, run `npm run webhook:receiver` with the same
+`OPENCHARTS_WEBHOOK_SECRET`, set `OPENCHARTS_WEBHOOK_URLS=http://127.0.0.1:8788/`,
+then `npm run doctor`: the receiver prints each delivery and whether its
+signature checks out.
+
 `X-OpenCharts-Delivery` (`symbol:timeframe:barTime`) stays the same across
 retries, so receivers can drop duplicates.
+
+## Trading safety
+
+Paper trading is the default. The backend never trades with live keys unless
+you give it live keys. These safety features work whichever order path you use.
+
+- **Hard limits:** set them under `limits` in `opencharts.config.ts`:
+  - `maxPositionPct`: the largest position as a % of equity (default 10).
+  - `maxOpenPositions`: how many positions can be open at once (default 5).
+  - `dailyLossPct`: the daily loss stop, as a % of yesterday's equity (default 2).
+- **Position guard:** on start and every 5 minutes, it checks that every open position has a live stop at Alpaca. A bracket leg, a stop, a stop-limit and a trailing stop all count.
+  - When a stop is missing, the guard places one. It uses the latest planned stop in the journal, or `price - 2 x ATR` when there is none. With `guard.missingStop: "flatten"`, it closes the position instead.
+  - If placing a stop fails twice, it alerts you and blocks new entries on our order path until that position has a stop.
+  - It also alerts, once a day each, when positions break the hard limits.
+  - Alerts go to your webhooks as `{"type":"alert","text":...}` and into the journal. `/api/health` shows the guard's state.
+- **Our order tools (optional):**
+  - Turn them on with `orders.enabled: true`, and give `OPENCHARTS_TRADER_TOKEN` to the Trader bot only.
+  - `place_order` checks for a live approval, a stop below the price, whole shares for stocks, and the hard limits. It also refuses when the guard has entries blocked.
+  - Stocks go in as GTC market brackets, or OTO orders when there is no target. Crypto is a market buy, then a separate GTC stop-limit sell, because Alpaca has no crypto brackets.
+  - `place_order` with `side: "sell"` closes the whole position. It never shorts.
+- **Journal:** approvals, signals, webhooks, orders (placed or rejected), guard stops and alerts are all logged with time, agent, ticker, action, size, entry, stop, target, reason, evidence and outcome.
+  - Bots add ideas, rejections and notes with `add_journal_entry`.
+  - After an order placed through Alpaca's official MCP, the Trader should log `action: "plan"` with the stop, so the guard can restore it.
+  - Download everything with `GET /api/journal.csv`.
 
 ## Deploying
 
@@ -190,5 +235,5 @@ Cloudflare Tunnel, with the terminal behind Cloudflare Access and `/mcp` on its 
   track the market closely; volume is much lower than the consolidated tape.
 - The free plan allows one live stream connection per feed, so run one backend
   per set of keys.
-- The terminal is read-only for now. Trading through Alpaca's paper account
-  comes in a later milestone.
+- The terminal itself is read-only for now. Bots can trade through the MCP
+  tools. Trading from the terminal comes in a later milestone.

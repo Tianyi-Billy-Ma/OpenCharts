@@ -10,6 +10,19 @@ import type { Candle } from "../src/services/schemas.ts";
 
 const DATA_BASE = "https://data.alpaca.markets";
 const PAPER_BASE = "https://paper-api.alpaca.markets";
+
+/**
+ * Alpaca keys from the environment. Also reads the names Alpaca's own SDKs
+ * (APCA_API_*) and official MCP server (ALPACA_API_KEY) use, so one set of
+ * secrets serves both.
+ */
+export function alpacaCredentialsFromEnv(
+  env: Record<string, string | undefined>,
+): AlpacaCredentials | undefined {
+  const keyId = env.ALPACA_KEY_ID || env.ALPACA_API_KEY || env.APCA_API_KEY_ID;
+  const secretKey = env.ALPACA_SECRET_KEY || env.APCA_API_SECRET_KEY;
+  return keyId && secretKey ? { keyId, secretKey } : undefined;
+}
 const LIVE_BASE = "https://api.alpaca.markets";
 const STOCK_STREAM = "wss://stream.data.alpaca.markets/v2/iex";
 const CRYPTO_STREAM = "wss://stream.data.alpaca.markets/v1beta3/crypto/us";
@@ -56,6 +69,51 @@ export interface Position {
   marketValue: number;
   unrealizedPl: number;
   unrealizedPlPct: number;
+  assetClass: string;
+}
+
+export interface Account {
+  equity: number;
+  /** Equity at the previous close, for the daily loss stop. */
+  lastEquity: number;
+  buyingPower: number;
+  tradingBlocked: boolean;
+}
+
+export interface Order {
+  id: string;
+  /** As Alpaca returns it: "NVDA", or "BTC/USD" for crypto. */
+  symbol: string;
+  side: "buy" | "sell";
+  type: string;
+  qty: number;
+  /** Already executed; `qty - filledQty` is what is still working. */
+  filledQty: number;
+  /** Dollar amount for notional orders, whose `qty` is 0 (Alpaca sends null). */
+  notional: number | null;
+  /** Average price of what has filled so far, or null before any fill. */
+  filledAvgPrice: number | null;
+  status: string;
+  stopPrice: number | null;
+  limitPrice: number | null;
+  orderClass: string;
+  /** Bracket and OTO child orders (the stop and target legs). */
+  legs: Order[];
+}
+
+/** An order request in Alpaca's own field names (POST /v2/orders). */
+export type OrderRequest = Record<string, unknown>;
+
+/** The account side: orders and positions. Paper unless `live` was set. */
+export interface Trading {
+  getAccount(): Promise<Account>;
+  getPositions(): Promise<Position[]>;
+  /** Open orders, with bracket legs nested. */
+  getOpenOrders(): Promise<Order[]>;
+  getOrder(id: string): Promise<Order>;
+  placeOrder(request: OrderRequest): Promise<Order>;
+  cancelOrder(id: string): Promise<void>;
+  closePosition(symbol: string): Promise<void>;
 }
 
 export interface MarketData {
@@ -173,7 +231,7 @@ export interface AlpacaClientOptions {
   live?: boolean;
 }
 
-export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketData {
+export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketData & Trading {
   const doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   const SocketImpl = options.webSocketImpl ?? globalThis.WebSocket;
   const log = options.log ?? ((m: string) => console.log(`[alpaca] ${m}`));
@@ -182,18 +240,44 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
   const headers = (): Record<string, string> =>
     creds ? { "APCA-API-KEY-ID": creds.keyId, "APCA-API-SECRET-KEY": creds.secretKey } : {};
 
-  const getJson = async (url: URL): Promise<unknown> => {
-    // Crypto data is public; stock data needs keys.
+  const getJson = async (
+    url: URL,
+    init: { method?: string; body?: unknown } = {},
+  ): Promise<unknown> => {
+    // Crypto data is public; stock data and the account need keys.
     if (!creds && !url.pathname.includes("/crypto/")) {
       throw new Error("This needs Alpaca keys: set ALPACA_KEY_ID and ALPACA_SECRET_KEY.");
     }
-    const response = await doFetch(url, { headers: headers() });
+    const response = await doFetch(url, {
+      method: init.method ?? "GET",
+      headers: {
+        ...headers(),
+        ...(init.body !== undefined && { "content-type": "application/json" }),
+      },
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       throw new Error(`Alpaca ${response.status}: ${detail.slice(0, 200) || response.statusText}`);
     }
-    return response.json();
+    return response.status === 204 ? null : response.json();
   };
+  const trading = (path: string) => new URL(`${options.live ? LIVE_BASE : PAPER_BASE}${path}`);
+  const toOrder = (o: Record<string, unknown>): Order => ({
+    id: String(o.id),
+    symbol: String(o.symbol),
+    side: o.side as Order["side"],
+    type: String(o.type),
+    qty: Number(o.qty),
+    filledQty: Number(o.filled_qty ?? 0),
+    notional: o.notional == null ? null : Number(o.notional),
+    filledAvgPrice: o.filled_avg_price == null ? null : Number(o.filled_avg_price),
+    status: String(o.status),
+    stopPrice: o.stop_price == null ? null : Number(o.stop_price),
+    limitPrice: o.limit_price == null ? null : Number(o.limit_price),
+    orderClass: String(o.order_class ?? "simple"),
+    legs: ((o.legs as Record<string, unknown>[] | null) ?? []).map(toOrder),
+  });
 
   return {
     async getBars(request) {
@@ -258,9 +342,7 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
     },
 
     async getPositions() {
-      const body = (await getJson(
-        new URL(`${options.live ? LIVE_BASE : PAPER_BASE}/v2/positions`),
-      )) as Array<Record<string, string>>;
+      const body = (await getJson(trading("/v2/positions"))) as Array<Record<string, string>>;
       return body.map((p) => ({
         symbol: p.symbol!,
         qty: Number(p.qty),
@@ -270,7 +352,55 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
         marketValue: Number(p.market_value),
         unrealizedPl: Number(p.unrealized_pl),
         unrealizedPlPct: Number(p.unrealized_plpc) * 100,
+        assetClass: p.asset_class ?? "us_equity",
       }));
+    },
+
+    async getAccount() {
+      const a = (await getJson(trading("/v2/account"))) as Record<string, unknown>;
+      return {
+        equity: Number(a.equity),
+        lastEquity: Number(a.last_equity),
+        buyingPower: Number(a.buying_power),
+        tradingBlocked: Boolean(a.trading_blocked || a.account_blocked),
+      };
+    },
+
+    async getOpenOrders() {
+      const url = trading("/v2/orders");
+      url.searchParams.set("status", "open");
+      url.searchParams.set("nested", "true");
+      url.searchParams.set("limit", "500");
+      return ((await getJson(url)) as Record<string, unknown>[]).map(toOrder);
+    },
+
+    async getOrder(id) {
+      return toOrder(
+        (await getJson(trading(`/v2/orders/${encodeURIComponent(id)}?nested=true`))) as Record<
+          string,
+          unknown
+        >,
+      );
+    },
+
+    async placeOrder(request) {
+      return toOrder(
+        (await getJson(trading("/v2/orders"), { method: "POST", body: request })) as Record<
+          string,
+          unknown
+        >,
+      );
+    },
+
+    async cancelOrder(id) {
+      await getJson(trading(`/v2/orders/${encodeURIComponent(id)}`), { method: "DELETE" });
+    },
+
+    async closePosition(symbol) {
+      // Positions use "BTCUSD" for crypto.
+      await getJson(trading(`/v2/positions/${encodeURIComponent(symbol.replace("/", ""))}`), {
+        method: "DELETE",
+      });
     },
 
     streamQuotes(symbols, onQuote) {

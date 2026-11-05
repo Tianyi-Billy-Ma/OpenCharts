@@ -34,7 +34,26 @@ export interface OpenChartsConfig {
     /** Wait this long after a bar closes, so its final values are published. */
     settleMinutes: number;
   };
-  /** SQLite file for approvals, signals and (later) the journal. */
+  /** Hard limits. Our order tools reject orders that break them; the position guard alerts on breaches. */
+  limits: {
+    /** Largest position, as a % of account equity. */
+    maxPositionPct: number;
+    maxOpenPositions: number;
+    /** No new entries once the day's loss reaches this % of yesterday's equity. */
+    dailyLossPct: number;
+  };
+  /** Our own MCP order tools (place_order, cancel_order) for the Trader token. Off by default. */
+  orders: { enabled: boolean };
+  guard: {
+    /** Check that every open position has a live stop. Needs Alpaca keys. */
+    enabled: boolean;
+    everyMinutes: number;
+    /** What to do when a stop is missing: place one, or close the position. */
+    missingStop: "place" | "flatten";
+    /** Stop distance in ATRs when the journal has no planned stop. */
+    fallbackStopAtr: number;
+  };
+  /** SQLite file for approvals, signals and the journal. */
   dataPath: string;
 }
 
@@ -48,6 +67,9 @@ export const DEFAULT_CONFIG: OpenChartsConfig = {
   deskSignal: { timeframe: "1d", params: DEFAULT_DESK_SIGNAL_PARAMS },
   approvals: { tradingDays: 5 },
   scanner: { enabled: true, everyMinutes: 5, settleMinutes: 10 },
+  limits: { maxPositionPct: 10, maxOpenPositions: 5, dailyLossPct: 2 },
+  orders: { enabled: false },
+  guard: { enabled: true, everyMinutes: 5, missingStop: "place", fallbackStopAtr: 2 },
   dataPath: "data/opencharts.db",
 };
 
@@ -65,6 +87,9 @@ export async function loadConfig(path = process.env.OPENCHARTS_CONFIG): Promise<
     watchlist: { ...DEFAULT_CONFIG.watchlist, ...user.watchlist },
     approvals: { ...DEFAULT_CONFIG.approvals, ...user.approvals },
     scanner: { ...DEFAULT_CONFIG.scanner, ...user.scanner },
+    limits: { ...DEFAULT_CONFIG.limits, ...user.limits },
+    orders: { ...DEFAULT_CONFIG.orders, ...user.orders },
+    guard: { ...DEFAULT_CONFIG.guard, ...user.guard },
     deskSignal: {
       timeframe: user.deskSignal?.timeframe ?? DEFAULT_CONFIG.deskSignal.timeframe,
       params: { ...DEFAULT_CONFIG.deskSignal.params, ...user.deskSignal?.params },

@@ -81,6 +81,17 @@ export function createScanner(deps: ScannerDeps) {
     );
     const ok = results.every((r) => r.ok);
     store.setWebhookResult(signal.id, ok ? "sent" : "failed", results);
+    store.addJournal(
+      {
+        agent: "scanner",
+        ticker: signal.symbol,
+        action: "webhook",
+        outcome: results
+          .map((r) => `${r.host}: ${r.ok ? "sent" : `failed (${r.error})`}`)
+          .join("; "),
+      },
+      now(),
+    );
     for (const r of results.filter((r) => !r.ok))
       log(`webhook to ${r.host} failed after ${r.attempts} tries: ${r.error}`);
   };
@@ -120,6 +131,20 @@ export function createScanner(deps: ScannerDeps) {
       { symbol, timeframe, barTime: bar.time, signal: bar.signal!, detail, webhook },
       at,
     );
+    if (saved)
+      store.addJournal(
+        {
+          agent: "scanner",
+          ticker: symbol,
+          action: "signal",
+          entry: bar.close,
+          stop: detail.stop,
+          reason: `${bar.signal} on ${timeframe}`,
+          evidence: handoffText(saved).split(" | ")[2],
+          outcome: webhook,
+        },
+        at,
+      );
     if (saved)
       log(`${symbol} ${bar.signal} on ${new Date(bar.time * 1000).toISOString()} (${webhook})`);
     return saved;
