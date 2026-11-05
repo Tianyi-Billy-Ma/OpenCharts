@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { roundTrips, summarize } from "../../server/review.ts";
+import { roundTrips, summarize, windowStart } from "../../server/review.ts";
 
 describe("go-live review", () => {
   it("pairs fills into flat-to-flat trades, averaging partial fills", () => {
@@ -42,5 +42,13 @@ describe("go-live review", () => {
       avgReturnPct: 0,
       totalReturnPct: 0,
     });
+  });
+
+  it("starts the backtest at the signal bar before the first fill", () => {
+    const day = 86_400;
+    const candles = [0, 1, 2, 3].map((d) => ({ time: d * day }));
+    // A fill mid-way through bar 2: its BUY came at the close of bar 1.
+    expect(windowStart(candles, (2 * day + 3600) * 1000)).toBe(1);
+    expect(windowStart(candles, -1)).toBe(0);
   });
 });

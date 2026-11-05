@@ -113,3 +113,14 @@ export function summarize(trades: Array<Pick<Trade, "returnPct">>): Summary {
     totalReturnPct: (trades.reduce((eq, t) => eq * (1 + t.returnPct / 100), 1) - 1) * 100,
   };
 }
+
+/**
+ * Where the backtest window starts: the bar before the one holding the first
+ * fill, so the BUY that set up that entry (filled at the next bar's open) is in.
+ * Bars are stamped at their start, in seconds.
+ */
+export function windowStart(candles: Array<{ time: number }>, firstFillMs: number): number {
+  let holding = -1;
+  for (let i = 0; i < candles.length && candles[i]!.time * 1000 <= firstFillMs; i++) holding = i;
+  return Math.max(0, holding - 1);
+}
