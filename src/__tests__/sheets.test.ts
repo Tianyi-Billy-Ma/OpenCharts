@@ -17,7 +17,7 @@ const credentials = {
   private_key: key,
 };
 
-function fakeGoogle(tabs: string[]) {
+function fakeGoogle(tabs: string[], rowCount = 1000) {
   const calls: Array<{ method: string; url: string; body: unknown }> = [];
   const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -39,7 +39,13 @@ function fakeGoogle(tabs: string[]) {
     }
     if (method === "GET")
       return Response.json({
-        sheets: tabs.map((title) => ({ properties: { title } })),
+        sheets: tabs.map((title, sheetId) => ({
+          properties: { sheetId, title, gridProperties: { rowCount } },
+        })),
+      });
+    if (url.includes("batchUpdate"))
+      return Response.json({
+        replies: [{ addSheet: { properties: { sheetId: 7 } } }],
       });
     return Response.json({});
   }) as typeof fetch;
@@ -80,13 +86,22 @@ describe("Sheets export", () => {
     );
     expect(methods).toEqual([
       "POST token",
-      "GET ?fields=sheets.properties.title",
+      "GET ?fields=sheets.properties(sheetId,title,gridProperties.rowCount)",
       "POST :batchUpdate",
       "POST /values/'OpenCharts Journal':clear",
       "PUT /values/'OpenCharts Journal'!A1?valueInputOption=RAW",
     ]);
     expect(google.calls[2]!.body).toEqual({
-      requests: [{ addSheet: { properties: { title: "OpenCharts Journal" } } }],
+      requests: [
+        {
+          addSheet: {
+            properties: {
+              title: "OpenCharts Journal",
+              gridProperties: { rowCount: 1000 },
+            },
+          },
+        },
+      ],
     });
     const { values } = google.calls[4]!.body as { values: unknown[][] };
     expect(values[0]![2]).toBe("agent");
@@ -115,6 +130,33 @@ describe("Sheets export", () => {
       ),
     ).toBe(true);
     expect(google.calls.some((c) => c.url.includes("batchUpdate"))).toBe(false);
+  });
+
+  it("adds rows when the journal outgrows the tab", async () => {
+    const store = openStore(":memory:");
+    for (let i = 0; i < 3; i++)
+      store.addJournal({ agent: "risk", action: "approve" });
+    const google = fakeGoogle(["OpenCharts Journal"], 2);
+    await createSheetsExporter({
+      target: { spreadsheetId: "s", tab: "OpenCharts Journal", credentials },
+      store,
+      fetchImpl: google.fetchImpl,
+    }).exportNow();
+    const grow = google.calls.find((c) => c.url.includes("batchUpdate"));
+    expect(grow?.body).toEqual({
+      requests: [
+        {
+          updateSheetProperties: {
+            properties: { sheetId: 0, gridProperties: { rowCount: 1004 } },
+            fields: "gridProperties.rowCount",
+          },
+        },
+      ],
+    });
+    // Grown before the clear and the write.
+    expect(google.calls.indexOf(grow!)).toBeLessThan(
+      google.calls.findIndex((c) => c.url.includes(":clear")),
+    );
   });
 
   it("reads its settings from the environment", () => {

@@ -87,7 +87,8 @@ export function createSheetsExporter(options: {
   const log = options.log ?? ((m: string) => console.log(`[sheets] ${m}`));
   let token: { value: string; expires: number } | null = null;
   let lastExported = "";
-  let tabReady = false;
+  // The tab's id and row count, read once; the grid must fit the rows before writing.
+  let tab: { sheetId: number; rows: number } | null = null;
 
   const accessToken = async () => {
     if (token && token.expires > now() + 60_000) return token.value;
@@ -156,16 +157,61 @@ export function createSheetsExporter(options: {
     const entries = store.listJournal({ limit: MAX_ROWS });
     const stamp = `${entries.length}:${entries[0]?.id ?? 0}`;
     if (stamp === lastExported) return { rows: entries.length, skipped: true };
-    if (!tabReady) {
-      const meta = (await call("?fields=sheets.properties.title", "GET")) as {
-        sheets?: Array<{ properties: { title: string } }>;
+    const needed = entries.length + 1;
+    if (!tab) {
+      const meta = (await call(
+        "?fields=sheets.properties(sheetId,title,gridProperties.rowCount)",
+        "GET",
+      )) as {
+        sheets?: Array<{
+          properties: {
+            sheetId: number;
+            title: string;
+            gridProperties?: { rowCount?: number };
+          };
+        }>;
       };
-      if (!meta.sheets?.some((s) => s.properties.title === target.tab)) {
-        await call(":batchUpdate", "POST", {
-          requests: [{ addSheet: { properties: { title: target.tab } } }],
-        });
+      const found = meta.sheets?.find((s) => s.properties.title === target.tab);
+      if (found) {
+        tab = {
+          sheetId: found.properties.sheetId,
+          rows: found.properties.gridProperties?.rowCount ?? 0,
+        };
+      } else {
+        const rows = Math.max(1000, needed);
+        const added = (await call(":batchUpdate", "POST", {
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: target.tab,
+                  gridProperties: { rowCount: rows },
+                },
+              },
+            },
+          ],
+        })) as {
+          replies: Array<{ addSheet: { properties: { sheetId: number } } }>;
+        };
+        tab = { sheetId: added.replies[0]!.addSheet.properties.sheetId, rows };
       }
-      tabReady = true;
+    }
+    if (needed > tab.rows) {
+      const rows = needed + 1000;
+      await call(":batchUpdate", "POST", {
+        requests: [
+          {
+            updateSheetProperties: {
+              properties: {
+                sheetId: tab.sheetId,
+                gridProperties: { rowCount: rows },
+              },
+              fields: "gridProperties.rowCount",
+            },
+          },
+        ],
+      });
+      tab.rows = rows;
     }
     await call(`/values/${range("")}:clear`, "POST", {});
     await call(`/values/${range("!A1")}?valueInputOption=RAW`, "PUT", {
@@ -188,7 +234,7 @@ export function createSheetsExporter(options: {
     start(everyMinutes: number) {
       const run = () =>
         exportNow().catch((err: unknown) => {
-          tabReady = false;
+          tab = null;
           log(
             `export failed: ${err instanceof Error ? err.message : String(err)}`,
           );
