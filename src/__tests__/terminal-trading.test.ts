@@ -217,6 +217,9 @@ describe("terminal trading", () => {
     );
     await gateway.cancelOrder("entry-1");
     expect(cancelled).toEqual(["entry-1"]);
+    // Cancel all skips the partly filled entry instead of stopping at it.
+    await gateway.cancelAllOrders();
+    expect(cancelled).toEqual(["entry-1", "entry-1", "btc-entry-2"]);
   });
 
   it("polls the account so equity stays fresh", async () => {

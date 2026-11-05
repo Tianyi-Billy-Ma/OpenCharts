@@ -399,7 +399,8 @@ export function createAlpacaTrading(
     },
     async cancelAllOrders() {
       for (const o of await orders()) {
-        if (o.side === "buy")
+        // Partly filled entries are refused by the backend (their stop would go too).
+        if (o.side === "buy" && o.filledQty === 0)
           await call(`/orders/${encodeURIComponent(o.id)}/cancel`, {});
       }
     },
