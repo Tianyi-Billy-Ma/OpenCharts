@@ -27,6 +27,9 @@ export interface ScannerDeps {
 }
 
 const fmt = (n: number | null | undefined, digits = 2) => (n == null ? "n/a" : n.toFixed(digits));
+/** Prices keep 4 significant digits below 1, so sub-cent coins never read as 0.00. */
+const price = (n: number | null | undefined) =>
+  n == null ? "n/a" : Math.abs(n) >= 1 ? n.toFixed(2) : n.toPrecision(4);
 
 /** The Grok Bot HANDOFF line: TICKER | IDEA | EVIDENCE | NEXT STEP. */
 export function handoffText(s: Pick<SignalRecord, "symbol" | "timeframe" | "signal" | "detail">) {
@@ -37,13 +40,13 @@ export function handoffText(s: Pick<SignalRecord, "symbol" | "timeframe" | "sign
     ? `BUY: ${s.timeframe} close broke the ${lookback}-bar high`
     : `SELL: ${s.timeframe} close broke the ${lookback}-bar low`;
   const evidence = [
-    `close ${fmt(d.close as number)} vs ${lookback}-bar ${buy ? "high" : "low"} ${fmt(d.breakoutLevel as number)}`,
+    `close ${price(d.close as number)} vs ${lookback}-bar ${buy ? "high" : "low"} ${price(d.breakoutLevel as number)}`,
     `volume ${fmt(d.volumeRatio as number, 1)}x its average`,
     `RSI ${fmt(d.rsi as number, 1)}`,
     `trend ${d.trend}`,
-    `ATR ${fmt(d.atr as number)}`,
+    `ATR ${price(d.atr as number)}`,
   ].join(", ");
-  const stop = `${fmt(d.stop as number)} (${d.stopFrom})`;
+  const stop = `${price(d.stop as number)} (${d.stopFrom})`;
   // Alpaca has no bracket orders for crypto: enter, then place a separate stop-limit.
   const next = !buy
     ? "Trader: exit or tighten the stop on any long; no shorts"

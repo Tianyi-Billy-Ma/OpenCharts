@@ -201,6 +201,29 @@ describe("webhooks", () => {
   });
 });
 
+describe("handoff prices", () => {
+  it("keeps sub-cent crypto prices readable", () => {
+    const text = handoffText({
+      symbol: "SHIB/USD",
+      timeframe: "1d",
+      signal: "BUY",
+      detail: {
+        breakoutLookback: 20,
+        close: 0.000025,
+        breakoutLevel: 0.000024,
+        stop: 0.000021,
+        stopFrom: "2x ATR",
+        atr: 0.000002,
+        volumeRatio: 2,
+        rsi: 60,
+        trend: "bullish",
+      },
+    });
+    expect(text).toContain("close 0.00002500 vs 20-bar high 0.00002400");
+    expect(text).toContain("stop-limit sell at 0.00002100 (2x ATR)");
+  });
+});
+
 describe("macro events", () => {
   it("lists upcoming FOMC and CPI dates in order", () => {
     expect(upcomingEvents("2026-11-05", 34)).toEqual([
