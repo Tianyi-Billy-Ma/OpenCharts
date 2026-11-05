@@ -25,6 +25,11 @@ This repository is a fork of
 (MIT). Upstream is maintained by one person and has unmerged community PRs, so
 we maintain this fork ourselves and pull upstream changes only when useful.
 
+Contribution rule, for people and AI agents alike: never push to, or open pull
+requests or issues against, the upstream repository. All branches and pull
+requests go to this fork (`Tianyi-Billy-Ma/OpenCharts`). Pulling upstream
+changes in is fine.
+
 ## 2. Product principles (open source)
 
 Billy's desk is the first user, but the project is built as an open-source app
