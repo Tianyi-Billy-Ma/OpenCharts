@@ -796,6 +796,41 @@ describe("position guard", () => {
     expect(placed[0]!.stop_price).not.toBe(60);
   });
 
+  it("keeps a plan logged for the next entry after the old position closed", async () => {
+    const store = openStore(":memory:");
+    const state: { positions: Position[] } = { positions: [position({})] };
+    const fake = fakeTrading(state);
+    let t = NOW;
+    const guard = createGuard({
+      config: DEFAULT_CONFIG,
+      marketData,
+      trading: fake.trading,
+      store,
+      alert: async () => {},
+      now: () => t,
+      sleep: async () => {},
+      log: () => {},
+    });
+    store.addJournal(
+      { agent: "trader", ticker: "NVDA", action: "plan", stop: 60 },
+      t - 1000,
+    );
+    await guard.runOnce(); // old trade, stop 60
+    state.positions = []; // it closes
+    t += 60_000;
+    store.addJournal(
+      { agent: "trader", ticker: "NVDA", action: "plan", stop: 94 },
+      t,
+    ); // plan for the next entry, before the guard notices the close
+    t += 60_000;
+    await guard.runOnce(); // flat
+    state.positions = [position({})];
+    fake.placed.length = 0;
+    t += 60_000;
+    await guard.runOnce();
+    expect(fake.placed[0]!.stop_price).toBe(94);
+  });
+
   it("finds the placed BUY's stop past many rejected attempts", async () => {
     const { store, guard, placed } = guardSetup({ positions: [position({})] });
     store.addJournal(

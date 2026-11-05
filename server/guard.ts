@@ -73,7 +73,7 @@ export function createGuard(deps: GuardDeps) {
   // When the guard last saw each ticker go flat, so a plan from that closed trade is not reused.
   // shortcut: in memory, so a position closed by its stop while the server was down still
   // leaves its plan in reach; persist it (or read FILL activities) if that ever bites.
-  const held = new Set<string>();
+  const lastSeenHeld = new Map<string, number>();
   const closedAt = new Map<string, number>();
 
   const alertOnce = async (key: string, text: string) => {
@@ -252,11 +252,15 @@ export function createGuard(deps: GuardDeps) {
       trading.getOpenOrders(),
       trading.getAccount(),
     ]);
+    // The cutoff is the last pass that still saw the old position, not the pass that found it
+    // gone: a plan logged in between is for the next entry.
     const nowHeld = new Set(positions.map((p) => watchName(p, watchlist)));
-    for (const ticker of held)
-      if (!nowHeld.has(ticker)) closedAt.set(ticker, now());
-    held.clear();
-    for (const ticker of nowHeld) held.add(ticker);
+    for (const [ticker, seen] of lastSeenHeld)
+      if (!nowHeld.has(ticker)) {
+        closedAt.set(ticker, seen);
+        lastSeenHeld.delete(ticker);
+      }
+    for (const ticker of nowHeld) lastSeenHeld.set(ticker, now());
 
     for (const position of positions) {
       const ticker = watchName(position, watchlist);
