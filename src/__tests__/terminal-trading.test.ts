@@ -1,6 +1,6 @@
 // @vitest-environment node
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type {
   MarketData,
   Order,
@@ -32,6 +32,7 @@ const order = (o: Partial<Order>): Order => ({
 
 const placed: OrderRequest[] = [];
 const cancelled: string[] = [];
+const closedSymbols: string[] = [];
 const trading: Trading = {
   getAccount: async () => ({
     equity: 100_000,
@@ -49,6 +50,18 @@ const trading: Trading = {
       marketValue: 30_500,
       unrealizedPl: 500,
       unrealizedPlPct: 0.016,
+      assetClass: "crypto",
+    },
+    // Bought before LTC left the watchlist.
+    {
+      symbol: "LTCUSD",
+      qty: 2,
+      side: "long",
+      avgEntryPrice: 80,
+      currentPrice: 80,
+      marketValue: 160,
+      unrealizedPl: 0,
+      unrealizedPlPct: 0,
       assetClass: "crypto",
     },
   ],
@@ -88,7 +101,7 @@ const trading: Trading = {
     return order({ id: `placed-${placed.length}` });
   },
   cancelOrder: async (id) => void cancelled.push(id),
-  closePosition: async () => {},
+  closePosition: async (symbol) => void closedSymbols.push(symbol),
 };
 const marketData = {
   getQuote: async (symbol: string) => ({
@@ -204,6 +217,33 @@ describe("terminal trading", () => {
     );
     await gateway.cancelOrder("entry-1");
     expect(cancelled).toEqual(["entry-1"]);
+  });
+
+  it("polls the account so equity stays fresh", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const gateway = createAlpacaTrading({ baseUrl: urlOf(withOrders) });
+      const events: unknown[] = [];
+      const stop = gateway.subscribe((e) => events.push(e));
+      vi.advanceTimersByTime(15_000);
+      await vi.waitFor(() => expect(events).toHaveLength(1));
+      expect(events[0]).toMatchObject({
+        type: "account.updated",
+        equity: 100_000,
+      });
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a held position that is not on the watchlist", async () => {
+    const gateway = createAlpacaTrading({ baseUrl: urlOf(withOrders) });
+    await gateway.closePosition("LTCUSD");
+    expect(closedSymbols).toEqual(["LTCUSD"]);
+    await expect(gateway.closePosition("NVDA")).rejects.toThrow(
+      /No open position/,
+    );
   });
 
   it("needs the x-opencharts header, and orders.enabled, to write", async () => {

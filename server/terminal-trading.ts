@@ -161,8 +161,13 @@ export async function handleTerminalTrading(
     id &&
     parts.length === 3
   ) {
-    const ticker = options.toAlpaca(id);
-    if (!ticker) return reply(404, { error: `Unknown symbol "${id}"` });
+    // Any held position can be closed, even one no longer on the watchlist.
+    const held = (await trading.getPositions()).find(
+      (p) => p.symbol.replace("/", "") === id,
+    );
+    const ticker = options.toAlpaca(id) ?? held?.symbol;
+    if (!ticker || !held)
+      return reply(404, { error: `No open position in "${id}"` });
     const result = await orders.place(
       { ticker, side: "sell", reason: "closed from the terminal" },
       "terminal",

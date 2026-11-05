@@ -232,6 +232,8 @@ interface BackendOrderResult {
 }
 
 /** One Alpaca account per backend, so a fixed id is enough. */
+const ACCOUNT_POLL_MS = 15_000;
+
 export const ALPACA_ACCOUNT_ID = "00000000-0000-4000-8000-00000000a1ac";
 
 const terminalName = (symbol: string) => symbol.replace("/", "");
@@ -422,8 +424,24 @@ export function createAlpacaTrading(
         );
     },
 
-    // shortcut: no push channel; the terminal re-syncs every 30s and after each action.
-    subscribe: () => () => {},
+    // shortcut: polls instead of pushing; positions and orders re-sync on the terminal's own 30s timer.
+    subscribe(handler) {
+      const poll = () =>
+        call<BackendAccount>("/account")
+          .then((a) =>
+            handler({
+              type: "account.updated",
+              accountId: ALPACA_ACCOUNT_ID,
+              equity: a.equity,
+              balance: a.equity,
+              freeMargin: a.buyingPower,
+              marginUsed: 0,
+            }),
+          )
+          .catch(() => {}); // the next poll tries again
+      const id = setInterval(poll, ACCOUNT_POLL_MS);
+      return () => clearInterval(id);
+    },
   };
 }
 
