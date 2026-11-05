@@ -149,8 +149,9 @@ the browser never sees them.
 - **Storage**: SQLite. It is the source of truth for signals, approvals, the
   journal, drawings and settings.
 - **Backtest**: a command-line tool in the backend (`npm run backtest NVDA`)
-  that runs the same Desk Signal code over Alpaca's free historical daily bars
-  (3+ years).
+  that runs the same Desk Signal code, on the same configured timeframe, over
+  Alpaca's free historical bars (3+ years). The go-live gate compares paper
+  results with a backtest on the timeframe actually traded.
 
 ### 5.4 Web terminal (this fork)
 
@@ -177,16 +178,25 @@ the browser never sees them.
 - No bot other than the Trader gets order tools, on either path.
 - Every order carries a stop-loss at placement (Alpaca bracket orders), so
   exits do not depend on any bot or webhook.
-- Timing: stock signals arrive after the close, so the Trader places a day
-  market bracket order; Alpaca queues it and it fills at the next open. Crypto
-  trades 24/7, so it is ordered right away. Alpaca does not offer bracket
-  orders for crypto, so the stop is placed as a separate order right after the
-  fill (a stop-limit, the only stop type Alpaca supports for crypto), and the
-  scanner alerts if a crypto position has no stop.
+- Timing: stock signals arrive after the close, so the Trader places a GTC
+  (good-till-canceled) market bracket order. Alpaca queues it, it fills at the
+  next open, and the stop and target legs stay live for the whole 2 to 10 day
+  hold. A DAY bracket would drop its exits after the first session, so it is
+  not allowed.
+- Crypto trades 24/7, so it is ordered right away. Alpaca does not offer
+  bracket orders for crypto, so the stop is placed as a separate stop-limit
+  order (the only stop type Alpaca supports for crypto) right after the fill.
+- **Position guard**: a backend job, separate from the daily signal scanner,
+  runs every 5 minutes (24/7) and on backend start. It checks every open
+  position against Alpaca's open orders. If a position has no live stop, the
+  guard places one itself from the journal's planned stop, or from a default
+  ATR stop if no plan exists. If placing it fails twice, the guard alerts the
+  owner and blocks new entries on our order path until it is resolved.
+  Optionally (config `missing_stop: flatten`), it closes the position instead.
 - Hard limits (max position size, max open positions, daily loss stop) are set
   in `opencharts.yaml`. Our order path rejects orders that break them. On the
-  official-MCP path we cannot block orders, so the scanner checks positions
-  against the limits every run and alerts on a breach.
+  official-MCP path we cannot block orders, so the position guard checks
+  positions against the limits every run and alerts on a breach.
 - Secrets (broker keys, webhook secrets, MCP token) live only in `.env` (mode
   600) or the user's secret manager. Never in git, logs, chat, the journal, or
   any bot's machine.
@@ -255,8 +265,9 @@ the browser never sees them.
 9. **Public view:** none. The whole site is behind Cloudflare Access.
 10. **Backtest:** a CLI in the backend, using the same Desk Signal code.
 11. **Code location:** the backend lives in `server/` in this repository.
-12. **Order timing:** day market bracket orders after the close for stocks;
-    crypto ordered right away with a separate stop.
+12. **Order timing:** GTC market bracket orders after the close for stocks;
+    crypto ordered right away with a separate stop, backed by the position
+    guard.
 
 ## 10. Open questions
 
