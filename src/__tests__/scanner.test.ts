@@ -109,6 +109,30 @@ describe("signal scanner", () => {
     expect(JSON.stringify(saved)).not.toContain("token=abc");
   });
 
+  it("checks the approval when the signal is found, not when the pass started", async () => {
+    let now = (TODAY + 20 * 60) * 1000;
+    const { impl, calls } = fakeFetch(0);
+    const store = openStore(":memory:");
+    store.setApproval("BTC/USD", now + 60_000, now);
+    const scanner = createScanner({
+      config,
+      marketData: {
+        getBars: async (r) => {
+          now += 120_000; // the approval ends while bars load
+          return marketData.getBars(r);
+        },
+      } as MarketData,
+      store,
+      webhooks: { urls: ["https://hooks.example.com/x"], secret: SECRET },
+      deliver: { fetchImpl: impl, retryDelaysMs: [] },
+      now: () => now,
+      log: () => {},
+    });
+    await scanner.scanOnce();
+    expect(store.listSignals()[0]!.webhook).toBe("not approved");
+    expect(calls).toHaveLength(0);
+  });
+
   it("marks the signal failed after 3 retries", async () => {
     const now = (TODAY + 20 * 60) * 1000;
     const { impl, calls } = fakeFetch(10);
@@ -123,10 +147,13 @@ describe("signal scanner", () => {
 
 describe("webhooks", () => {
   it("reports network errors without throwing", async () => {
+    // Node's fetch can quote the URL, token and all, in its message.
     const impl = (async () => {
-      throw new Error("ECONNREFUSED");
+      throw new TypeError("fetch failed for http://127.0.0.1:9/x?token=abc", {
+        cause: { code: "ECONNREFUSED" },
+      });
     }) as unknown as typeof fetch;
-    const r = await deliverWebhook("http://127.0.0.1:9/x", "{}", SECRET, "id", {
+    const r = await deliverWebhook("http://127.0.0.1:9/x?token=abc", "{}", SECRET, "id", {
       fetchImpl: impl,
       retryDelaysMs: [],
     });

@@ -53,9 +53,15 @@ const webhookUrls = (process.env.OPENCHARTS_WEBHOOK_URLS ?? "")
 const webhookSecret = process.env.OPENCHARTS_WEBHOOK_SECRET ?? "";
 let webhooks: { urls: string[]; secret: string } | null = null;
 if (webhookUrls.length) {
-  const bad = webhookUrls.filter((u) => !URL.canParse(u));
+  // Never echo the URLs: they can hold tokens.
+  const bad = webhookUrls.filter((u) => {
+    const url = URL.parse(u);
+    return !url || !/^https?:$/.test(url.protocol) || url.username !== "" || url.password !== "";
+  });
   if (bad.length)
-    console.warn(`[opencharts] Ignoring webhooks: ${bad.length} URL(s) do not parse.`);
+    console.warn(
+      `[opencharts] Webhooks are off: ${bad.length} URL(s) are not http(s) or hold a user:password. Put tokens in the path or query instead.`,
+    );
   else if (webhookSecret.length < 32)
     console.warn("[opencharts] Webhooks are off: set OPENCHARTS_WEBHOOK_SECRET (32+ characters).");
   else webhooks = { urls: webhookUrls, secret: webhookSecret };

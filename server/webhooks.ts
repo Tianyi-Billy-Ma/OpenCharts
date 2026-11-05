@@ -64,7 +64,14 @@ export async function deliverWebhook(
       if (res.ok) return { host, ok: true, attempts: attempt };
       error = `HTTP ${res.status}`;
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      // fetch errors can quote the URL, which may hold a token, so keep only a safe code.
+      const e = err as { name?: string; cause?: { code?: unknown } };
+      error =
+        e.name === "TimeoutError"
+          ? "timed out"
+          : typeof e.cause?.code === "string"
+            ? e.cause.code
+            : "network error";
     }
     const wait = delays[attempt - 1];
     if (wait != null) await new Promise((resolve) => setTimeout(resolve, wait));

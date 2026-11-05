@@ -107,7 +107,8 @@ export function createScanner(deps: ScannerDeps) {
           stop: swingStop ? bar.swingLow : bar.atr != null ? bar.close - 2 * bar.atr : null,
           stopFrom: swingStop ? "last swing low" : "2x ATR",
         };
-        const approved = store.isApproved(symbol, at);
+        // Checked now, not at the pass start: an earlier webhook's retries can take minutes.
+        const approved = store.isApproved(symbol, now());
         const webhook = !webhooks ? "no webhooks" : approved ? "pending" : "not approved";
         const saved = store.recordSignal(
           { symbol, timeframe, barTime: bar.time, signal: bar.signal, detail, webhook },
