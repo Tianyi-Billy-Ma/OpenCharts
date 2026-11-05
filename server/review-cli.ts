@@ -70,11 +70,14 @@ const barsSince = async (symbol: string) => {
 // Backtest the watchlist and anything traded over the paper window.
 // The whole watchlist, so trades the backtest took and paper missed show up too.
 const watchlist = [...config.watchlist.stocks, ...config.watchlist.crypto];
+// Fills can name crypto "DOGEUSD"; no US stock ticker ends in USD, so read that as the pair.
+const cryptoName = (s: string) =>
+  !s.includes("/") && /^[A-Z0-9]{2,10}USD$/.test(s) ? `${s.slice(0, -3)}/USD` : s;
 // The Alpaca form of each traded symbol, preferring "BTC/USD" over "BTCUSD" so crypto stays crypto.
 const traded = new Map<string, string>();
 for (const f of fills)
   if (f.symbol.includes("/") || !traded.has(symbolKey(f.symbol)))
-    traded.set(symbolKey(f.symbol), f.symbol);
+    traded.set(symbolKey(f.symbol), cryptoName(f.symbol));
 const symbols = [...new Set([...watchlist.map(symbolKey), ...traded.keys()])];
 const perSymbol = [];
 const backtestTrades: Trade[] = [];

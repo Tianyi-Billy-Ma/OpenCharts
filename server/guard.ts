@@ -82,7 +82,8 @@ export function createGuard(deps: GuardDeps) {
     alerted.add(dayKey);
     log(`ALERT ${text}`);
     store.addJournal({ agent: "guard", action: "alert", outcome: text }, now());
-    await deps
+    // Not awaited: webhook retries must not hold up the stop checks for other positions.
+    void deps
       .alert(text)
       .catch((err: unknown) => log(`alert not sent: ${String(err)}`));
   };

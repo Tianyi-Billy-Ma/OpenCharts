@@ -313,7 +313,10 @@ export function createApp(options: AppOptions): {
         ? "public, max-age=31536000, immutable"
         : "no-cache",
     });
-    createReadStream(file).pipe(res);
+    // A read error (file swapped by a rebuild, EACCES) arrives as an event; unhandled it kills the server.
+    createReadStream(file)
+      .on("error", () => res.destroy())
+      .pipe(res);
   };
 
   const hosts = new Set(
