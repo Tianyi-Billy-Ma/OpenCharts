@@ -92,6 +92,8 @@ const app = createApp({
   store,
   mcp,
   guardStatus: guard?.status,
+  // Paper only: live keys come after the go-live gate (docs/requirements.md 5.5).
+  trading: credentials ? { trading: marketData, orders, mode: "paper" } : undefined,
 });
 
 app.server.listen(port, host, () => {
