@@ -139,12 +139,14 @@ export function createGuard(deps: GuardDeps) {
     }
     // A working target (a sell limit) holds shares too, and the stop is refused while it does.
     // The stop matters more, so the target goes.
-    const targets = allOrders(orders).filter(
+    const targets = orders.filter(
       (o) =>
         sameSymbol(o.symbol, position.symbol) &&
         o.side === "sell" &&
         !STOP_TYPES.has(o.type) &&
-        o.status !== "held",
+        o.status !== "held" &&
+        // Cancelling one leg of an OCO or bracket cancels its stop too, so leave groups alone.
+        !o.legs.some((l) => STOP_TYPES.has(l.type)),
     );
     for (const o of targets) await trading.cancelOrder(o.id);
     const crypto = isCrypto(ticker);

@@ -523,6 +523,24 @@ describe("position guard", () => {
     );
   });
 
+  it("keeps an OCO group whose stop covers part of the position", async () => {
+    const oco = order({
+      id: "oco-1",
+      side: "sell",
+      type: "limit",
+      qty: 4,
+      orderClass: "oco",
+      legs: [order({ id: "oco-stop", side: "sell", type: "stop", qty: 4 })],
+    });
+    const { guard, placed, cancelled } = guardSetup({
+      positions: [position({})],
+      open: [oco],
+    });
+    await guard.runOnce();
+    expect(cancelled).toEqual([]);
+    expect(placed[0]).toMatchObject({ type: "stop", qty: "6" });
+  });
+
   it("falls back to an ATR stop, and uses a stop-limit for crypto", async () => {
     const { guard, placed } = guardSetup({
       positions: [
