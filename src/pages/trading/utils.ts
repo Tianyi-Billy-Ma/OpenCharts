@@ -47,14 +47,18 @@ export function toUnixMs(ts: number): number {
 }
 
 /** Convert candles for indicator lib */
-export function toIndicatorCandles(candles: CandlestickData<Time>[]): CandleData[] {
-  return candles.map((c) => ({
+/** `volumes` is the volume series built alongside `candles`, index for index. */
+export function toIndicatorCandles(
+  candles: CandlestickData<Time>[],
+  volumes: { value: number }[] = [],
+): CandleData[] {
+  return candles.map((c, i) => ({
     time: c.time as number,
     open: c.open,
     high: c.high,
     low: c.low,
     close: c.close,
-    volume: 0,
+    volume: volumes[i]?.value ?? 0,
   }));
 }
 

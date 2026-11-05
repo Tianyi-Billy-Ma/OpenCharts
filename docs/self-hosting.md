@@ -68,6 +68,23 @@ The backend's routes, all `GET`:
 | `/api/candles?symbol&timeframe[&limit][&fromMs][&toMs]` | Bars, oldest first, times in seconds; `toMs` is exclusive |
 | `/api/quote?symbol` | Latest bid and ask |
 | `/api/stream` | Server-Sent Events, one `{"type":"tick",...}` per quote |
+| `/api/desk-signal?symbol[&timeframe][&limit]` | Desk Signal per closed bar: trend, BUY/SELL, swing zones, EMAs, RSI, ATR |
+
+## Desk Signal
+
+Desk Signal is the swing-trade trigger in `src/lib/desk-signal.ts`: stacked EMAs
+(8, 21, 50, 200) for trend, a 20-bar breakout with 1.5x volume and RSI above 50
+for BUY (the mirror for SELL), swing highs and lows as zones, and no signal while
+ATR is in the top 10% of its last 100 values. It only looks at closed bars.
+
+- **On the chart:** Indicators → Desk Signal draws the EMA ribbon, BUY and SELL
+  arrows, and the swing zones. The chart uses the default rules.
+- **From the backend:** `/api/desk-signal` uses the timeframe and rules in
+  `opencharts.config.ts`.
+- **Backtest:** `npm run backtest -- NVDA` (or `BTC/USD`) runs it over 3 years of
+  Alpaca history: long only, entry at the next open, stop at the last swing low,
+  exit on SELL, the stop, or after 10 bars. Add `--timeframe 4h`, `--years 5`, or
+  `--json`.
 
 ## Known limits
 

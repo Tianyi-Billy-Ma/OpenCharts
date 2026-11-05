@@ -303,8 +303,63 @@ export function vwap(candles: CandleData[]): IndicatorPoint[] {
   return result;
 }
 
+// ── Volume moving average ────────────────────────────────────
+/** Simple average of volume over `period` bars, ending at each bar. Missing volume counts as 0. */
+export function volumeSma(candles: CandleData[], period = 20): IndicatorPoint[] {
+  const result: IndicatorPoint[] = [];
+  const p = validPeriod(period);
+  if (p === null || candles.length < p) return result;
+  const vol = (c: CandleData) => (Number.isFinite(c.volume) ? c.volume! : 0);
+
+  let sum = 0;
+  for (let i = 0; i < p; i++) sum += vol(candles[i]!);
+  result.push({ time: candles[p - 1]!.time, value: sum / p });
+  for (let i = p; i < candles.length; i++) {
+    sum += vol(candles[i]!) - vol(candles[i - p]!);
+    result.push({ time: candles[i]!.time, value: sum / p });
+  }
+  return result;
+}
+
+// ── Swing highs and lows ─────────────────────────────────────
+export interface SwingPoint extends IndicatorPoint {
+  /** Index of the swing bar in `candles`. */
+  index: number;
+  /** Index of the bar on which the swing became known (`index + strength`). */
+  confirmedAt: number;
+}
+
+/**
+ * Pivot highs and lows: a bar whose high (low) is strictly above (below) the
+ * `strength` bars on each side. A pivot is only known `strength` bars later,
+ * which `confirmedAt` records so callers never peek ahead.
+ */
+export function swingPoints(
+  candles: CandleData[],
+  strength = 2,
+): { highs: SwingPoint[]; lows: SwingPoint[] } {
+  const highs: SwingPoint[] = [];
+  const lows: SwingPoint[] = [];
+  const n = validPeriod(strength);
+  if (n === null) return { highs, lows };
+
+  for (let i = n; i < candles.length - n; i++) {
+    let isHigh = true;
+    let isLow = true;
+    for (let j = i - n; j <= i + n; j++) {
+      if (j === i) continue;
+      if (candles[j]!.high >= candles[i]!.high) isHigh = false;
+      if (candles[j]!.low <= candles[i]!.low) isLow = false;
+    }
+    const t = candles[i]!.time;
+    if (isHigh) highs.push({ time: t, value: candles[i]!.high, index: i, confirmedAt: i + n });
+    if (isLow) lows.push({ time: t, value: candles[i]!.low, index: i, confirmedAt: i + n });
+  }
+  return { highs, lows };
+}
+
 // ── Indicator Registry (for UI) ──────────────────────────────
-export type IndicatorType = "SMA" | "EMA" | "RSI" | "MACD" | "BOLL" | "ATR" | "STOCH" | "VWAP";
+export type IndicatorType = "SMA" | "EMA" | "RSI" | "MACD" | "BOLL" | "ATR" | "STOCH" | "VWAP" | "DESK";
 
 export type IndicatorPane = "overlay" | "below";
 
@@ -372,5 +427,12 @@ export const INDICATOR_REGISTRY: IndicatorConfig[] = [
     pane: "overlay",
     defaultParams: {},
     color: "#42a5f5",
+  },
+  {
+    type: "DESK",
+    label: "Desk Signal (EMA ribbon, BUY/SELL, swing zones)",
+    pane: "overlay",
+    defaultParams: {},
+    color: "#26a69a",
   },
 ];

@@ -723,6 +723,7 @@ network requests. Drop those components if you want a strictly offline build.
 | `npm run build` | Production build to `dist/` |
 | `npm run build:desk` | Production build wired to the `server/` backend |
 | `npm run server` | Start the backend (reads `opencharts.config.ts` and `.env`) |
+| `npm run backtest -- NVDA` | Backtest Desk Signal on Alpaca history (`--timeframe 1d --years 3 --json`) |
 | `npm run check:size` | Fail if the first-load payload exceeds its budget (run after `build`) |
 | `npm run build:lib` | Build the npm package into `dist-lib/` (fails if any CSS escapes the scope) |
 | `npm run check:package` | Verify the package matches its `exports` (run after `build:lib`) |
