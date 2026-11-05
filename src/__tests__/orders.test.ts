@@ -245,6 +245,16 @@ describe("order desk", () => {
     ]);
   });
 
+  it("journals a BUY that Alpaca refuses", async () => {
+    const { store, desk, failNext } = setup();
+    store.setApproval("NVDA", NOW + DAY * 1000, NOW);
+    failNext(1);
+    const r = await desk.place(buy, "trader");
+    expect(r).toMatchObject({ ok: false, orders: [] });
+    expect(r.rejected[0]).toMatch(/Alpaca refused the order: Alpaca 422/);
+    expect(store.listJournal({ limit: 1 })[0]!.outcome).toMatch(/^rejected: Alpaca refused/);
+  });
+
   it("still reports and journals a crypto BUY when the fill check fails", async () => {
     const { store, desk, placed, trading } = setup();
     trading.getOrder = async () => {
