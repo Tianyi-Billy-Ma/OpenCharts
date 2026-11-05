@@ -166,7 +166,10 @@ export function createOrderDesk(deps: OrderDeskDeps) {
           (sum, o) =>
             sum +
             (o.notional != null
-              ? Math.max(0, o.notional - o.filledQty * (o.filledAvgPrice ?? entry))
+              ? Math.max(
+                  0,
+                  o.notional - o.filledQty * (o.filledAvgPrice ?? entry),
+                )
               : (o.qty - o.filledQty) * entry),
           0,
         );
@@ -223,6 +226,20 @@ export function createOrderDesk(deps: OrderDeskDeps) {
       time_in_force: "gtc",
     });
     if (order instanceof Error) return brokerRejected(order);
+    // Journaled before waiting, so a guard run meanwhile already sees this trade's stop.
+    journal(agent, args, entry, `placed ${order.id}`);
+    const followUp = (outcome: string) =>
+      store.addJournal(
+        {
+          agent,
+          ticker: args.ticker,
+          action: "stop",
+          size: qty,
+          stop: stopPrice,
+          outcome,
+        },
+        now(),
+      );
     // Wait briefly for the fill, then protect it; the position guard covers anything slower.
     let filled = order;
     let pollError = "";
@@ -237,7 +254,7 @@ export function createOrderDesk(deps: OrderDeskDeps) {
     }
     if (filled.status !== "filled") {
       const note = `entry not filled yet${pollError}; the position guard will place the stop once it fills`;
-      journal(agent, args, entry, `placed ${order.id}; ${note}`);
+      followUp(`waiting: ${note}`);
       return { ok: true, rejected: [], orders: [filled], note };
     }
     const stopOrder = await trading
@@ -252,19 +269,17 @@ export function createOrderDesk(deps: OrderDeskDeps) {
       })
       .catch((err: unknown) => err as Error);
     if (stopOrder instanceof Error) {
-      const note = `stop failed (${stopOrder.message}); the position guard will retry`;
-      journal(agent, args, entry, `placed ${order.id}; ${note}`);
+      // Also what happens when a guard run placed the stop first: the shares are already held.
+      const note = `stop not placed (${stopOrder.message}); the position guard covers the position`;
+      followUp(`failed: ${note}`);
       return { ok: true, rejected: [], orders: [filled], note };
     }
     const note =
       target != null
         ? "crypto has no brackets, so the target was not placed"
         : undefined;
-    journal(
-      agent,
-      args,
-      entry,
-      `placed ${order.id}, stop ${stopOrder.id}${note ? `; ${note}` : ""}`,
+    followUp(
+      `placed ${stopOrder.id} for ${order.id}${note ? `; ${note}` : ""}`,
     );
     return { ok: true, rejected: [], orders: [filled, stopOrder], note };
   };

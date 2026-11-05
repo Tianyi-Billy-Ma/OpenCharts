@@ -1,4 +1,10 @@
-import { isCrypto, type MarketData, type Order, type Position, type Trading } from "./alpaca.ts";
+import {
+  isCrypto,
+  type MarketData,
+  type Order,
+  type Position,
+  type Trading,
+} from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import { deskSignalBars } from "./desk-tools.ts";
 import { newYorkDate } from "./events.ts";
@@ -38,10 +44,12 @@ export interface GuardStatus {
 const STOP_TYPES = new Set(["stop", "stop_limit", "trailing_stop"]);
 
 /** Every order, with bracket and OTO legs flattened in. */
-const allOrders = (orders: Order[]): Order[] => orders.flatMap((o) => [o, ...allOrders(o.legs)]);
+const allOrders = (orders: Order[]): Order[] =>
+  orders.flatMap((o) => [o, ...allOrders(o.legs)]);
 
 /** Bracket exit legs stay "held" until the entry fully fills, so they protect nothing yet. */
-const isLiveStop = (o: Order) => o.side === "sell" && STOP_TYPES.has(o.type) && o.status !== "held";
+const isLiveStop = (o: Order) =>
+  o.side === "sell" && STOP_TYPES.has(o.type) && o.status !== "held";
 
 /** "BTCUSD" (positions) back to the watchlist's "BTC/USD". */
 function watchName(position: Position, watchlist: string[]): string {
@@ -67,7 +75,9 @@ export function createGuard(deps: GuardDeps) {
     alerted.add(dayKey);
     log(`ALERT ${text}`);
     store.addJournal({ agent: "guard", action: "alert", outcome: text }, now());
-    await deps.alert(text).catch((err: unknown) => log(`alert not sent: ${String(err)}`));
+    await deps
+      .alert(text)
+      .catch((err: unknown) => log(`alert not sent: ${String(err)}`));
   };
 
   const plannedStop = async (ticker: string, price: number) => {
@@ -80,11 +90,19 @@ export function createGuard(deps: GuardDeps) {
       .filter(
         (e) =>
           e.stop != null &&
-          (e.action === "plan" || (e.reason.startsWith("BUY") && e.outcome.startsWith("placed"))),
+          (e.action === "plan" ||
+            (e.reason.startsWith("BUY") && e.outcome.startsWith("placed"))),
       )
       .sort((a, b) => b.time - a.time || b.id - a.id)[0]?.stop;
-    if (planned != null && planned < price) return { stop: planned, from: "journal plan" };
-    const { bars } = await deskSignalBars(deps, ticker, config.deskSignal.timeframe, 1, now());
+    if (planned != null && planned < price)
+      return { stop: planned, from: "journal plan" };
+    const { bars } = await deskSignalBars(
+      deps,
+      ticker,
+      config.deskSignal.timeframe,
+      1,
+      now(),
+    );
     const atr = bars[bars.length - 1]?.atr;
     if (atr == null) throw new Error(`no ATR for ${ticker}`);
     return {
@@ -94,10 +112,17 @@ export function createGuard(deps: GuardDeps) {
   };
 
   /** Cover `qty` shares (the part no live stop covers), or close the whole position. */
-  const protect = async (position: Position, ticker: string, qty: number, orders: Order[]) => {
+  const protect = async (
+    position: Position,
+    ticker: string,
+    qty: number,
+    orders: Order[],
+  ) => {
     if (config.guard.missingStop === "flatten") {
       // Open orders on the symbol hold its shares, and a close fails while they do.
-      for (const o of orders.filter((o) => sameSymbol(o.symbol, position.symbol)))
+      for (const o of orders.filter((o) =>
+        sameSymbol(o.symbol, position.symbol),
+      ))
         await trading.cancelOrder(o.id);
       await trading.closePosition(position.symbol);
       store.addJournal(
@@ -112,6 +137,16 @@ export function createGuard(deps: GuardDeps) {
       );
       return;
     }
+    // A working target (a sell limit) holds shares too, and the stop is refused while it does.
+    // The stop matters more, so the target goes.
+    const targets = allOrders(orders).filter(
+      (o) =>
+        sameSymbol(o.symbol, position.symbol) &&
+        o.side === "sell" &&
+        !STOP_TYPES.has(o.type) &&
+        o.status !== "held",
+    );
+    for (const o of targets) await trading.cancelOrder(o.id);
     const crypto = isCrypto(ticker);
     const { stop, from } = await plannedStop(ticker, position.currentPrice);
     const stopPrice = roundPrice(stop, crypto);
@@ -124,7 +159,10 @@ export function createGuard(deps: GuardDeps) {
         ? {
             type: "stop_limit",
             stop_price: stopPrice,
-            limit_price: roundPrice(stopPrice * (1 - CRYPTO_STOP_LIMIT_GAP), true),
+            limit_price: roundPrice(
+              stopPrice * (1 - CRYPTO_STOP_LIMIT_GAP),
+              true,
+            ),
           }
         : { type: "stop", stop_price: stopPrice }),
     });
@@ -136,7 +174,7 @@ export function createGuard(deps: GuardDeps) {
         size: qty,
         stop: stopPrice,
         reason: "open position had no live stop",
-        evidence: `stop from ${from}`,
+        evidence: `stop from ${from}${targets.length ? `; cancelled ${targets.length} target order(s) holding the shares` : ""}`,
         outcome: `placed ${order.id}`,
       },
       now(),
@@ -171,7 +209,12 @@ export function createGuard(deps: GuardDeps) {
       }
       try {
         // Rounded so float subtraction never sends Alpaca a qty like 0.30000000000000004.
-        await protect(position, ticker, Number((position.qty - covered).toFixed(9)), orders);
+        await protect(
+          position,
+          ticker,
+          Number((position.qty - covered).toFixed(9)),
+          orders,
+        );
         failures.delete(ticker);
       } catch (err) {
         const count = (failures.get(ticker) ?? 0) + 1;
@@ -187,7 +230,8 @@ export function createGuard(deps: GuardDeps) {
     }
     // Positions that closed no longer need a stop.
     for (const ticker of failures.keys())
-      if (!positions.some((p) => watchName(p, watchlist) === ticker)) failures.delete(ticker);
+      if (!positions.some((p) => watchName(p, watchlist) === ticker))
+        failures.delete(ticker);
 
     const { maxOpenPositions, maxPositionPct, dailyLossPct } = config.limits;
     if (positions.length > maxOpenPositions)
@@ -196,14 +240,20 @@ export function createGuard(deps: GuardDeps) {
         `${positions.length} open positions, over the limit of ${maxOpenPositions}.`,
       );
     for (const p of positions) {
-      const pct = account.equity > 0 ? (Math.abs(p.marketValue) / account.equity) * 100 : 0;
+      const pct =
+        account.equity > 0
+          ? (Math.abs(p.marketValue) / account.equity) * 100
+          : 0;
       if (pct > maxPositionPct)
         await alertOnce(
           `size:${p.symbol}`,
           `${watchName(p, watchlist)} is ${pct.toFixed(1)}% of equity, over the ${maxPositionPct}% limit.`,
         );
     }
-    const dayPct = account.lastEquity > 0 ? (account.equity / account.lastEquity - 1) * 100 : 0;
+    const dayPct =
+      account.lastEquity > 0
+        ? (account.equity / account.lastEquity - 1) * 100
+        : 0;
     if (dayPct <= -dailyLossPct)
       await alertOnce(
         "daily-loss",
@@ -231,7 +281,9 @@ export function createGuard(deps: GuardDeps) {
         running = true;
         runOnce()
           .catch((err: unknown) =>
-            log(`check failed: ${err instanceof Error ? err.message : String(err)}`),
+            log(
+              `check failed: ${err instanceof Error ? err.message : String(err)}`,
+            ),
           )
           .finally(() => (running = false));
       };

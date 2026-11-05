@@ -340,7 +340,11 @@ describe("order desk", () => {
 
   it("still reports and journals a crypto BUY when the fill check fails", async () => {
     const { store, desk, placed, trading } = setup();
+    let journaledBeforePoll = false;
     trading.getOrder = async () => {
+      // A guard run during this wait must already see the planned stop.
+      journaledBeforePoll =
+        store.listJournal({ action: "order" })[0]?.stop === 90;
       throw new Error("Alpaca 503: unavailable");
     };
     store.setApproval("BTC/USD", NOW + DAY * 1000, NOW);
@@ -351,9 +355,13 @@ describe("order desk", () => {
     expect(r.ok).toBe(true);
     expect(r.note).toMatch(/fill check failed: Alpaca 503.*position guard/);
     expect(placed).toHaveLength(1);
-    const [row] = store.listJournal({ limit: 1 });
-    expect(row).toMatchObject({ action: "order", stop: 90 });
+    expect(journaledBeforePoll).toBe(true);
+    const [row] = store.listJournal({ action: "order" });
+    expect(row).toMatchObject({ stop: 90 });
     expect(row!.outcome).toMatch(/^placed /);
+    expect(store.listJournal({ action: "stop" })[0]!.outcome).toMatch(
+      /^waiting: .*fill check failed/,
+    );
   });
 
   it("sells by cancelling the position's open orders and closing it; never shorts", async () => {
@@ -493,6 +501,26 @@ describe("position guard", () => {
       );
     await guard.runOnce();
     expect(placed[0]).toMatchObject({ qty: "10", stop_price: 93.5 });
+  });
+
+  it("cancels a working target that holds the shares, then places the stop", async () => {
+    const target = order({
+      id: "target-1",
+      side: "sell",
+      type: "limit",
+      qty: 10,
+      limitPrice: 120,
+    });
+    const { guard, placed, cancelled, store } = guardSetup({
+      positions: [position({})],
+      open: [target],
+    });
+    await guard.runOnce();
+    expect(cancelled).toEqual(["target-1"]);
+    expect(placed[0]).toMatchObject({ side: "sell", type: "stop", qty: "10" });
+    expect(store.listJournal({ action: "stop" })[0]!.evidence).toMatch(
+      /cancelled 1 target/,
+    );
   });
 
   it("falls back to an ATR stop, and uses a stop-limit for crypto", async () => {
