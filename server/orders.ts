@@ -176,12 +176,18 @@ export function createOrderDesk(deps: OrderDeskDeps) {
     });
     // Wait briefly for the fill, then protect it; the position guard covers anything slower.
     let filled = order;
-    for (let i = 0; i < FILL_POLLS && filled.status !== "filled"; i++) {
-      await sleep(1000);
-      filled = await trading.getOrder(order.id);
+    let pollError = "";
+    try {
+      for (let i = 0; i < FILL_POLLS && filled.status !== "filled"; i++) {
+        await sleep(1000);
+        filled = await trading.getOrder(order.id);
+      }
+    } catch (err) {
+      // The entry is live at Alpaca, so report it as placed; the guard still protects it.
+      pollError = ` (fill check failed: ${err instanceof Error ? err.message : String(err)})`;
     }
     if (filled.status !== "filled") {
-      const note = "entry not filled yet; the position guard will place the stop once it fills";
+      const note = `entry not filled yet${pollError}; the position guard will place the stop once it fills`;
       journal(agent, args, entry, `placed ${order.id}; ${note}`);
       return { ok: true, rejected: [], orders: [filled], note };
     }

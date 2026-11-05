@@ -245,6 +245,24 @@ describe("order desk", () => {
     ]);
   });
 
+  it("still reports and journals a crypto BUY when the fill check fails", async () => {
+    const { store, desk, placed, trading } = setup();
+    trading.getOrder = async () => {
+      throw new Error("Alpaca 503: unavailable");
+    };
+    store.setApproval("BTC/USD", NOW + DAY * 1000, NOW);
+    const r = await desk.place(
+      { ticker: "BTC/USD", side: "buy", qty: 0.5, stop: 90, reason: "x" },
+      "trader",
+    );
+    expect(r.ok).toBe(true);
+    expect(r.note).toMatch(/fill check failed: Alpaca 503.*position guard/);
+    expect(placed).toHaveLength(1);
+    const [row] = store.listJournal({ limit: 1 });
+    expect(row).toMatchObject({ action: "order", stop: 90 });
+    expect(row!.outcome).toMatch(/^placed /);
+  });
+
   it("sells by cancelling the position's open orders and closing it; never shorts", async () => {
     const legs = order({ id: "00000000-0000-0000-0000-0000000000aa", side: "sell", type: "stop" });
     const { desk, cancelled, closed } = setup({ positions: [position({})], open: [legs] });
