@@ -97,6 +97,13 @@ export function createMcpHandler(options: {
         { error: "Missing or wrong bearer token" },
         { "www-authenticate": "Bearer" },
       );
+    const version = req.headers["mcp-protocol-version"];
+    if (typeof version === "string" && !PROTOCOL_VERSIONS.includes(version))
+      return send(
+        res,
+        400,
+        rpcError(null, -32600, `Unsupported MCP-Protocol-Version "${version}"`),
+      );
 
     const raw = await readBody(req);
     if (raw === null) return send(res, 413, rpcError(null, -32600, "Body too large"));
@@ -106,10 +113,18 @@ export function createMcpHandler(options: {
     } catch {
       return send(res, 400, rpcError(null, -32700, "Parse error"));
     }
-    if (!msg || typeof msg !== "object" || Array.isArray(msg))
-      return send(res, 400, rpcError(null, -32600, "Invalid request"));
-    if (typeof msg.method !== "string") return send(res, 202); // a response from the client
+    const invalid = () => send(res, 400, rpcError(null, -32600, "Invalid request"));
+    if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.jsonrpc !== "2.0")
+      return invalid();
+    const validId =
+      typeof msg.id === "string" || (typeof msg.id === "number" && Number.isInteger(msg.id));
+    if (msg.method === undefined) {
+      // A response to a server request; this server sends none, so just acknowledge it.
+      return validId && ("result" in msg || "error" in msg) ? send(res, 202) : invalid();
+    }
+    if (typeof msg.method !== "string") return invalid();
     if (msg.id === undefined) return send(res, 202); // a notification
+    if (!validId) return invalid();
     const reply = (result: unknown) => send(res, 200, { jsonrpc: "2.0", id: msg.id, result });
 
     switch (msg.method) {

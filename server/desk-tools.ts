@@ -55,6 +55,12 @@ function str(args: Record<string, unknown>, key: string): string | undefined {
   if (typeof v !== "string") throw new Error(`${key} must be a string`);
   return v;
 }
+function oneOf(args: Record<string, unknown>, key: string, values: string[]): string | undefined {
+  const v = str(args, key);
+  if (v !== undefined && !values.includes(v))
+    throw new Error(`${key} must be one of ${values.join(", ")}`);
+  return v;
+}
 function num(
   args: Record<string, unknown>,
   key: string,
@@ -270,8 +276,8 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
         if (!Array.isArray(list) || list.length > 50)
           throw new Error("symbols must be a list of up to 50");
         const symbols = list.map((x) => symbol({ symbol: x }));
-        const trend = str(args, "trend");
-        const signal = str(args, "signal");
+        const trend = oneOf(args, "trend", ["bullish", "bearish", "neutral"]);
+        const signal = oneOf(args, "signal", ["BUY", "SELL"]);
         const minRsi = num(args, "minRsi", 0, 100);
         const maxRsi = num(args, "maxRsi", 0, 100);
         const minPrice = num(args, "minPrice", 0, Infinity);

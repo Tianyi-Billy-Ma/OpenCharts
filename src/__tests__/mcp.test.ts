@@ -99,6 +99,29 @@ describe("MCP server", () => {
     expect((await fetch(url, { headers: { authorization: `Bearer ${DESK}` } })).status).toBe(405);
   });
 
+  it("rejects malformed JSON-RPC and unsupported protocol versions", async () => {
+    const post = (body: unknown, headers: Record<string, string> = {}) =>
+      fetch(url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${RISK}`, ...headers },
+        body: JSON.stringify(body),
+      });
+    const approve = {
+      method: "tools/call",
+      params: { name: "set_approval", arguments: { ticker: "AMD" } },
+    };
+    expect((await post({ jsonrpc: "1.0", id: 1, ...approve })).status).toBe(400);
+    expect((await post({ jsonrpc: "2.0", id: null, ...approve })).status).toBe(400);
+    expect((await post({})).status).toBe(400);
+    expect((await post({ jsonrpc: "2.0", id: 1, result: {} })).status).toBe(202);
+    const badVersion = await post(
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { "mcp-protocol-version": "not-supported" },
+    );
+    expect(badVersion.status).toBe(400);
+    expect(store.isApproved("AMD", NOW)).toBe(false);
+  });
+
   it("initializes, answers notifications with 202 and lists tools by role", async () => {
     const init = await rpc(DESK, "initialize", {
       protocolVersion: "2025-06-18",
@@ -142,6 +165,10 @@ describe("MCP server", () => {
 
     const screen = (await call(DESK, "screen", { trend: "bullish" })).structuredContent!.result;
     expect(screen.matches.every((r: { trend: string }) => r.trend === "bullish")).toBe(true);
+
+    const typo = await call(DESK, "screen", { trend: "bullsh" });
+    expect(typo.isError).toBe(true);
+    expect(typo.content[0]!.text).toContain("trend must be one of");
 
     const bad = await call(DESK, "get_bars", { symbol: "NVDA", timeframe: "2h" });
     expect(bad.isError).toBe(true);
