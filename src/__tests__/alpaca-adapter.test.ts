@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildBarsUrl, parseBars, type MarketData } from "../../server/alpaca.ts";
+import { buildBarsUrl, createAlpacaClient, parseBars, type MarketData } from "../../server/alpaca.ts";
 import { createApp } from "../../server/app.ts";
 import { DEFAULT_CONFIG } from "../../server/config.ts";
 import { createAlpacaAdapter, parseSseChunk } from "../adapter/alpaca.ts";
@@ -36,7 +36,7 @@ describe("buildBarsUrl", () => {
   });
 
   it("caps the limit and rejects unknown timeframes", () => {
-    expect(buildBarsUrl({ symbol: "NVDA", timeframe: "1d", limit: 50_000 })!.searchParams.get("limit")).toBe("1000");
+    expect(buildBarsUrl({ symbol: "NVDA", timeframe: "1d", limit: 50_000 })!.searchParams.get("limit")).toBe("10000");
     expect(buildBarsUrl({ symbol: "NVDA", timeframe: "2d" })).toBeNull();
   });
 });
@@ -56,6 +56,26 @@ describe("parseBars", () => {
   it("returns nothing for an empty or null bar list", () => {
     expect(parseBars({ bars: null }, "NVDA")).toEqual([]);
     expect(parseBars({ bars: {} }, "BTC/USD")).toEqual([]);
+  });
+});
+
+describe("getBars paging", () => {
+  it("follows next_page_token until the requested count is reached", async () => {
+    const bar = (i: number) => ({ t: new Date(NOW - i * 60_000).toISOString(), o: 1, h: 1, l: 1, c: 1, v: 1 });
+    const pages = [
+      { bars: { "BTC/USD": [bar(1), bar(2)] }, next_page_token: "p2" },
+      { bars: { "BTC/USD": [bar(3)] }, next_page_token: "p3" },
+    ];
+    const seen: string[] = [];
+    const fetchImpl = (async (url: URL) => {
+      seen.push(`${url.searchParams.get("page_token")}:${url.searchParams.get("limit")}`);
+      return new Response(JSON.stringify(pages[seen.length - 1]));
+    }) as unknown as typeof fetch;
+
+    const candles = await createAlpacaClient({ fetchImpl }).getBars({ symbol: "BTC/USD", timeframe: "1m", limit: 3 });
+    expect(candles).toHaveLength(3);
+    expect(candles.map((c) => c.time)).toEqual([...candles.map((c) => c.time)].sort((a, b) => a - b));
+    expect(seen).toEqual(["null:3", "p2:3"]);
   });
 });
 
@@ -118,6 +138,11 @@ describe("backend routes", () => {
     const res = await fetch(`${baseUrl}/some/client/route`);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("<title>ok</title>");
+  });
+
+  it("answers a malformed path with 400 instead of crashing", async () => {
+    expect((await fetch(`${baseUrl}/%`)).status).toBe(400);
+    expect((await fetch(`${baseUrl}/api/health`)).status).toBe(200);
   });
 
   it("refuses to serve files outside the frontend folder", async () => {

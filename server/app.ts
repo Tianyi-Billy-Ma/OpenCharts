@@ -28,6 +28,8 @@ export interface AppOptions {
 
 const TIMEFRAMES = new Set(["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]);
 const HEARTBEAT_MS = 15_000;
+/** A tab that stops reading gets dropped once this much is queued for it. */
+const MAX_CLIENT_BUFFER_BYTES = 1_000_000;
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -101,7 +103,14 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
       ask: quote.ask,
       timestamp: quote.timestamp,
     })}\n\n`;
-    for (const res of clients) res.write(frame);
+    for (const res of clients) {
+      if (res.writableLength > MAX_CLIENT_BUFFER_BYTES) {
+        clients.delete(res);
+        res.destroy(); // the adapter reconnects and starts fresh
+        continue;
+      }
+      res.write(frame);
+    }
   };
   const stopUpstream = marketData.streamQuotes(alpacaSymbols, broadcast);
   const heartbeat = setInterval(() => {
@@ -163,7 +172,13 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
   const serveStatic = (url: URL, res: ServerResponse) => {
     if (!staticDir) return sendJson(res, 404, { error: "Frontend not built. Run `npm run build:desk`." });
     // normalize + prefix check keeps requests inside dist/.
-    let file = normalize(join(staticDir, decodeURIComponent(url.pathname)));
+    let pathname: string;
+    try {
+      pathname = decodeURIComponent(url.pathname);
+    } catch {
+      return sendJson(res, 400, { error: "Bad path" });
+    }
+    let file = normalize(join(staticDir, pathname));
     if (!file.startsWith(staticDir + sep)) return sendJson(res, 403, { error: "Forbidden" });
     if (!existsSync(file) || statSync(file).isDirectory()) file = join(staticDir, "index.html");
     const hashed = file.startsWith(join(staticDir, "assets") + sep);

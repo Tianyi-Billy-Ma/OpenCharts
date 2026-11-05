@@ -54,7 +54,10 @@ const TIMEFRAMES: Record<string, { alpaca: string; seconds: number }> = {
 };
 
 const DEFAULT_LIMIT = 500;
-const MAX_LIMIT = 1000;
+/** Total bars per request; also Alpaca's per-page maximum. */
+export const MAX_LIMIT = 10_000;
+/** Stops a misbehaving `next_page_token` loop. */
+const MAX_PAGES = 20;
 const DAY_MS = 86_400_000;
 
 export const isCrypto = (symbol: string) => symbol.includes("/");
@@ -164,7 +167,19 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
     async getBars(request) {
       const url = buildBarsUrl(request);
       if (!url) return [];
-      return parseBars(await getJson(url), request.symbol);
+      const wanted = Number(url.searchParams.get("limit"));
+      // A page can hold fewer bars than asked for, so follow next_page_token.
+      const candles: Candle[] = [];
+      // Query params stay fixed across pages; only page_token changes.
+      for (let page = 0; page < MAX_PAGES && candles.length < wanted; page++) {
+        const body = (await getJson(url)) as { next_page_token?: string | null };
+        candles.push(...parseBars(body, request.symbol));
+        if (!body.next_page_token) break;
+        url.searchParams.set("page_token", body.next_page_token);
+      }
+      // Newest-first requests keep the newest `wanted` bars; windowed ones the oldest.
+      candles.sort((a, b) => a.time - b.time);
+      return url.searchParams.get("sort") === "desc" ? candles.slice(-wanted) : candles.slice(0, wanted);
     },
 
     async getQuote(symbol) {
