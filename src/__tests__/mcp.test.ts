@@ -166,6 +166,17 @@ describe("MCP server", () => {
     const screen = (await call(DESK, "screen", { trend: "bullish" })).structuredContent!.result;
     expect(screen.matches.every((r: { trend: string }) => r.trend === "bullish")).toBe(true);
 
+    const events = (await call(DESK, "get_events", { days: 10 })).structuredContent!.result;
+    expect(events).toEqual([
+      { date: "2026-11-10", time: "08:30", kind: "CPI", title: "CPI for October 2026" },
+    ]);
+    store.recordSignal(
+      { symbol: "NVDA", timeframe: "1d", barTime: 1, signal: "BUY", detail: {}, webhook: "sent" },
+      NOW,
+    );
+    const signals = (await call(DESK, "list_signals", { symbol: "NVDA" })).structuredContent!.result;
+    expect(signals).toMatchObject([{ symbol: "NVDA", signal: "BUY", webhook: "sent" }]);
+
     const typo = await call(DESK, "screen", { trend: "bullsh" });
     expect(typo.isError).toBe(true);
     expect(typo.content[0]!.text).toContain("trend must be one of");

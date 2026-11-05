@@ -5,8 +5,8 @@ import { dirname } from "node:path";
 const { DatabaseSync } = process.getBuiltinModule("node:sqlite") as typeof import("node:sqlite");
 
 /**
- * The backend's SQLite database, the source of truth for approvals (and, in
- * later milestones, signals and the journal). One file, `data/opencharts.db`
+ * The backend's SQLite database, the source of truth for approvals and
+ * Desk Signal events (and, in later milestones, the journal). One file, `data/opencharts.db`
  * by default; ":memory:" for tests.
  */
 
@@ -17,7 +17,31 @@ export interface Approval {
   approvedAt: number;
 }
 
+export interface SignalRecord {
+  id: number;
+  symbol: string;
+  timeframe: string;
+  /** Bar open time, epoch seconds. */
+  barTime: number;
+  signal: "BUY" | "SELL";
+  /** The numbers behind the signal, as sent in the webhook. */
+  detail: Record<string, unknown>;
+  createdAt: number;
+  /** "pending", "sent", "failed", "not approved" or "no webhooks". */
+  webhook: string;
+  /** Per-receiver results, hosts only (webhook URLs can hold secrets). */
+  deliveries: Array<{ host: string; ok: boolean; attempts: number; error?: string }>;
+}
+
 export interface Store {
+  /** Saves a new signal. Returns null when this symbol, timeframe and bar is already saved. */
+  recordSignal(
+    s: Pick<SignalRecord, "symbol" | "timeframe" | "barTime" | "signal" | "detail" | "webhook">,
+    nowMs?: number,
+  ): SignalRecord | null;
+  setWebhookResult(id: number, webhook: string, deliveries: SignalRecord["deliveries"]): void;
+  /** Newest first. */
+  listSignals(options?: { symbol?: string; limit?: number }): SignalRecord[];
   setApproval(ticker: string, until: number, nowMs?: number): Approval;
   /** True when there was a live approval to revoke. */
   revokeApproval(ticker: string, nowMs?: number): boolean;
@@ -35,8 +59,40 @@ export function openStore(path: string): Store {
       ticker TEXT PRIMARY KEY,
       until_ms INTEGER NOT NULL,
       approved_at_ms INTEGER NOT NULL
-    )
+    );
+    CREATE TABLE IF NOT EXISTS signals (
+      id INTEGER PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      bar_time INTEGER NOT NULL,
+      signal TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      created_ms INTEGER NOT NULL,
+      webhook TEXT NOT NULL,
+      deliveries TEXT NOT NULL DEFAULT '[]',
+      UNIQUE (symbol, timeframe, bar_time)
+    );
   `);
+  // The UNIQUE key is the webhook dedupe: one POST per ticker per bar.
+  const insertSignal = db.prepare(
+    `INSERT INTO signals (symbol, timeframe, bar_time, signal, detail, created_ms, webhook)
+     VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+  );
+  const updateWebhook = db.prepare(`UPDATE signals SET webhook = ?, deliveries = ? WHERE id = ?`);
+  const recent = db.prepare(
+    `SELECT * FROM signals WHERE (? IS NULL OR symbol = ?) ORDER BY bar_time DESC, id DESC LIMIT ?`,
+  );
+  const toSignal = (r: Record<string, unknown>): SignalRecord => ({
+    id: Number(r.id),
+    symbol: String(r.symbol),
+    timeframe: String(r.timeframe),
+    barTime: Number(r.bar_time),
+    signal: r.signal as SignalRecord["signal"],
+    detail: JSON.parse(String(r.detail)) as Record<string, unknown>,
+    createdAt: Number(r.created_ms),
+    webhook: String(r.webhook),
+    deliveries: JSON.parse(String(r.deliveries)) as SignalRecord["deliveries"],
+  });
   const upsert = db.prepare(
     `INSERT INTO approvals (ticker, until_ms, approved_at_ms) VALUES (?, ?, ?)
      ON CONFLICT (ticker) DO UPDATE SET until_ms = excluded.until_ms, approved_at_ms = excluded.approved_at_ms`,
@@ -49,6 +105,25 @@ export function openStore(path: string): Store {
   const one = db.prepare(`SELECT 1 FROM approvals WHERE ticker = ? AND until_ms > ?`);
 
   return {
+    recordSignal(s, nowMs = Date.now()) {
+      const result = insertSignal.run(
+        s.symbol,
+        s.timeframe,
+        s.barTime,
+        s.signal,
+        JSON.stringify(s.detail),
+        nowMs,
+        s.webhook,
+      );
+      if (Number(result.changes) === 0) return null;
+      return { ...s, id: Number(result.lastInsertRowid), createdAt: nowMs, deliveries: [] };
+    },
+    setWebhookResult(id, webhook, deliveries) {
+      updateWebhook.run(webhook, JSON.stringify(deliveries), id);
+    },
+    listSignals({ symbol, limit = 50 } = {}) {
+      return recent.all(symbol ?? null, symbol ?? null, limit).map(toSignal);
+    },
     setApproval(ticker, until, nowMs = Date.now()) {
       upsert.run(ticker, until, nowMs);
       return { ticker, until, approvedAt: nowMs };

@@ -5,6 +5,7 @@ import type { Symbol } from "../src/services/schemas.ts";
 import { isCrypto, type AlpacaQuote, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import { deskSignalBars } from "./desk-tools.ts";
+import type { Store } from "./store.ts";
 
 /**
  * The OpenCharts backend's HTTP surface. The browser talks only to this; the
@@ -16,6 +17,7 @@ import { deskSignalBars } from "./desk-tools.ts";
  *   GET /api/quote?symbol
  *   GET /api/stream                  Server-Sent Events: {"type":"tick",...}
  *   GET /api/desk-signal?symbol[&timeframe][&limit]   Desk Signal on closed bars, newest last
+ *   GET /api/signals[?symbol]        recent Desk Signal events and their webhook status
  *   POST /mcp                        MCP server for the desk's bots (see mcp.ts), when tokens are set
  *
  * Anything else is served from the built frontend in `dist/`.
@@ -27,6 +29,8 @@ export interface AppOptions {
   hasKeys: boolean;
   /** Built frontend to serve. Skipped when the folder is missing. */
   staticDir?: string;
+  /** Signals for /api/signals. Unset: an empty list. */
+  store?: Pick<Store, "listSignals">;
   /** Handles POST /mcp. Unset: /mcp answers 404. */
   mcp?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 }
@@ -177,6 +181,13 @@ export function createApp(options: AppOptions): { server: Server; close: () => v
           timeframe,
           bars,
         });
+      }
+
+      case "/api/signals": {
+        const symbol = symbolParam ? alpacaSymbol : undefined;
+        if (symbolParam && !symbol)
+          return sendJson(res, 404, { error: `Unknown symbol "${symbolParam}"` });
+        return sendJson(res, 200, options.store?.listSignals({ symbol, limit: 50 }) ?? []);
       }
 
       case "/api/stream": {

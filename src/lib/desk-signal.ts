@@ -83,15 +83,16 @@ export function barCloseSeconds(barSeconds: number, stock: boolean): number {
   return (sessionDays - 1) * 86_400 + 16 * 3600;
 }
 
-/** Drop the last bar if it has not closed yet. `barSeconds` is the time from a bar's stamp to its close. */
+/** Drop trailing bars that have not closed by `nowMs`. `barSeconds` is the time from a bar's stamp to its close. */
 export function closedBars<T extends { time: number }>(
   candles: T[],
   barSeconds: number,
   nowMs = Date.now(),
 ): T[] {
-  const last = candles[candles.length - 1];
-  if (!last || (last.time + barSeconds) * 1000 <= nowMs) return candles;
-  return candles.slice(0, -1);
+  // Usually only the last bar is open; with a settle delay the one before can be too.
+  let end = candles.length;
+  while (end > 0 && (candles[end - 1]!.time + barSeconds) * 1000 > nowMs) end--;
+  return end === candles.length ? candles : candles.slice(0, end);
 }
 
 const byTime = (points: IndicatorPoint[]) => new Map(points.map((p) => [p.time, p.value]));
