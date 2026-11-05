@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type {
@@ -100,6 +101,7 @@ const trading: Trading = {
     placed.push(req);
     return order({ id: `placed-${placed.length}` });
   },
+  getOrderByClientId: async () => null,
   cancelOrder: async (id) => void cancelled.push(id),
   closePosition: async (symbol) => void closedSymbols.push(symbol),
 };
@@ -123,6 +125,8 @@ const orders = createOrderDesk({
   trading,
   store,
   blockedReason: () => null,
+  guardActive: true,
+  sleep: async () => {},
 });
 const withOrders = createApp({
   config: DEFAULT_CONFIG,
@@ -264,5 +268,35 @@ describe("terminal trading", () => {
     expect((await fetch(`${urlOf(readOnly)}/api/trading/account`)).status).toBe(
       200,
     );
+  });
+
+  it("refuses the account routes on an unknown Host (DNS rebinding)", async () => {
+    const statusFor = (host: string, path: string) =>
+      new Promise<number>((resolve, reject) => {
+        const port = (withOrders.server.address() as AddressInfo).port;
+        request(
+          {
+            host: "127.0.0.1",
+            port,
+            path,
+            method: "POST",
+            headers: { host, "x-opencharts": "1" },
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        )
+          .on("error", reject)
+          .end();
+      });
+    expect(
+      await statusFor("evil.example:8787", "/api/trading/positions/NVDA/close"),
+    ).toBe(403);
+    expect(await statusFor("evil.example", "/api/journal.csv")).toBe(403);
+    // A known host still gets through to the handler (no order here, so 404).
+    expect(
+      await statusFor("localhost:8787", "/api/trading/orders/missing/cancel"),
+    ).toBe(404);
   });
 });

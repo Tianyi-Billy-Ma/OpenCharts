@@ -566,7 +566,8 @@ function orderTools(
     },
     {
       name: "cancel_order",
-      description: "Cancel an open order by its Alpaca id. Trader only.",
+      description:
+        "Cancel an unfilled entry (BUY) order by its Alpaca id. Stops and targets stay: SELL to close the position. Trader only.",
       role: "trader",
       inputSchema: {
         type: "object",
@@ -577,7 +578,9 @@ function orderTools(
         const id = str(args, "orderId");
         if (!id || !/^[0-9a-f-]{8,64}$/i.test(id))
           throw new Error("orderId must be an Alpaca order id");
-        return orders.cancel(id, role);
+        const result = await orders.cancel(id, role);
+        if ("error" in result) throw new Error(result.error);
+        return result;
       },
     },
   ];

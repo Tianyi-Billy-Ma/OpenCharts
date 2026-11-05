@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   isCrypto,
   type MarketData,
@@ -18,7 +19,8 @@ import type { Store } from "./store.ts";
  *         Alpaca from the start. Crypto has no brackets: a market buy, then a
  *         separate GTC stop-limit sell once it fills.
  *   SELL  closes the whole position, after cancelling its open orders (the
- *         stop and target legs hold the shares).
+ *         stop and target legs hold the shares) and waiting until Alpaca has
+ *         really dropped them.
  *
  * Every attempt, placed or rejected, goes in the journal.
  */
@@ -48,6 +50,8 @@ export interface OrderDeskDeps {
   store: Store;
   /** Why new entries are blocked right now (the position guard sets this), or null. */
   blockedReason: () => string | null;
+  /** The position guard is running. Crypto BUYs need it: a slow fill is protected by the guard. */
+  guardActive: boolean;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -64,14 +68,89 @@ export const roundPrice = (price: number, crypto: boolean) =>
 export const CRYPTO_STOP_LIMIT_GAP = 0.01;
 
 const FILL_POLLS = 10;
+const CANCEL_POLLS = 20;
+
+export const STOP_TYPES = new Set(["stop", "stop_limit", "trailing_stop"]);
+
+/** Every order, with bracket and OTO legs flattened in. */
+export const allOrders = (orders: Order[]): Order[] =>
+  orders.flatMap((o) => [o, ...allOrders(o.legs)]);
+
+/** Bracket exit legs stay "held" until the entry fully fills, so they protect nothing yet. */
+export const isLiveStop = (o: Order) =>
+  o.side === "sell" && STOP_TYPES.has(o.type) && o.status !== "held";
+
+/** Shares of `symbol` that live stops (or a queued market SELL, already closing it) still cover. */
+export const coveredQty = (symbol: string, orders: Order[]) =>
+  allOrders(orders)
+    .filter(
+      (o) =>
+        sameSymbol(o.symbol, symbol) &&
+        (isLiveStop(o) ||
+          (o.side === "sell" && o.type === "market" && o.status !== "held")),
+    )
+    // A partly executed stop only protects what it has not sold yet.
+    .reduce((sum, o) => sum + o.qty - o.filledQty, 0);
+
+type Sleep = (ms: number) => Promise<void>;
+export const realSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Cancel orders and wait until Alpaca has dropped them. Its DELETE answers once
+ * the cancel is accepted, and a `pending_cancel` order still holds the shares.
+ */
+export async function cancelAndWait(
+  trading: Trading,
+  ids: string[],
+  sleep: Sleep,
+) {
+  // A refused cancel (already filled or cancelled) is fine; the wait below is the real check.
+  for (const id of ids) await trading.cancelOrder(id).catch(() => {});
+  for (let i = 0; ; i++) {
+    const open = new Set(
+      allOrders(await trading.getOpenOrders()).map((o) => o.id),
+    );
+    const left = ids.filter((id) => open.has(id));
+    if (!left.length) return;
+    if (i >= CANCEL_POLLS)
+      throw new Error(`orders still open after cancelling: ${left.join(", ")}`);
+    await sleep(500);
+  }
+}
+
+/**
+ * Cancel every open order on the symbol (legs included: a filled bracket's
+ * parent cannot be cancelled, its legs can), wait, then close what is left.
+ * Returns the qty closed and the orders cancelled; 0 when a stop sold it all meanwhile.
+ */
+export async function cancelAndClose(
+  trading: Trading,
+  symbol: string,
+  sleep: Sleep,
+) {
+  const ids = allOrders(await trading.getOpenOrders())
+    .filter((o) => sameSymbol(o.symbol, symbol))
+    .map((o) => o.id);
+  await cancelAndWait(trading, ids, sleep);
+  const left = (await trading.getPositions()).find((p) =>
+    sameSymbol(p.symbol, symbol),
+  );
+  if (left) await trading.closePosition(symbol);
+  return { qty: left?.qty ?? 0, cancelled: ids.length };
+}
+
+/** A 4xx is Alpaca saying no. A dropped connection, timeout or 5xx may still have placed it. */
+const isRefusal = (err: unknown) => {
+  const status = (err as { status?: number }).status;
+  return status != null && status >= 400 && status < 500 && status !== 408;
+};
 
 export type OrderDesk = ReturnType<typeof createOrderDesk>;
 
 export function createOrderDesk(deps: OrderDeskDeps) {
   const { config, marketData, trading, store } = deps;
   const now = deps.now ?? Date.now;
-  const sleep =
-    deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const sleep = deps.sleep ?? realSleep;
 
   const price = async (symbol: string) => {
     const quote = await marketData.getQuote(symbol).catch(() => null);
@@ -118,22 +197,36 @@ export function createOrderDesk(deps: OrderDeskDeps) {
         "stock qty must be whole shares (bracket orders cannot be fractional)",
       );
     if (stop == null || !(stop > 0)) rejected.push("every BUY needs a stop");
+    if (crypto && !deps.guardActive)
+      rejected.push(
+        "crypto BUYs need the position guard (guard.enabled): it places the stop when a fill is slow",
+      );
 
-    const [account, positions, openOrders, entry] = await Promise.all([
-      trading.getAccount(),
-      trading.getPositions(),
-      trading.getOpenOrders(),
-      price(args.ticker),
-    ]);
+    let lookups;
+    try {
+      lookups = await Promise.all([
+        trading.getAccount(),
+        trading.getPositions(),
+        trading.getOpenOrders(),
+        price(args.ticker),
+      ]);
+    } catch (err) {
+      journal(agent, args, null, `failed: ${errorText(err)}`);
+      throw err;
+    }
+    const [account, positions, openOrders, entry] = lookups;
+    // Checked as sent: rounding can move a price onto the other side of the entry.
+    const stopPrice = stop != null ? roundPrice(stop, crypto) : null;
+    const targetPrice = target != null ? roundPrice(target, crypto) : null;
     // Checked after the awaits, so a revoke or block that lands meanwhile still stops the order.
     if (!store.isApproved(args.ticker, now()))
       rejected.push(`${args.ticker} has no live Risk Officer approval`);
     const blocked = deps.blockedReason();
     if (blocked) rejected.push(`new entries are blocked: ${blocked}`);
-    if (stop != null && stop >= entry)
-      rejected.push(`stop ${stop} must be below the price ${entry}`);
-    if (target != null && target <= entry)
-      rejected.push(`target ${target} must be above the price ${entry}`);
+    if (stopPrice != null && stopPrice >= entry)
+      rejected.push(`stop ${stopPrice} must be below the price ${entry}`);
+    if (targetPrice != null && targetPrice <= entry)
+      rejected.push(`target ${targetPrice} must be above the price ${entry}`);
     if (account.tradingBlocked)
       rejected.push("Alpaca has blocked trading on this account");
     const { maxPositionPct, maxOpenPositions, dailyLossPct } = config.limits;
@@ -186,18 +279,40 @@ export function createOrderDesk(deps: OrderDeskDeps) {
     }
 
     // Alpaca can still refuse (e.g. buying power); that attempt is journaled too.
-    const submitEntry = (request: OrderRequest) =>
-      trading
-        .placeOrder(request)
-        .catch((err: unknown) =>
-          err instanceof Error ? err : new Error(String(err)),
+    // Our client_order_id lets a lost answer be looked up instead of guessed.
+    const submitEntry = async (
+      request: OrderRequest,
+    ): Promise<Order | OrderResult> => {
+      const clientOrderId = randomUUID();
+      try {
+        return await trading.placeOrder({
+          ...request,
+          client_order_id: clientOrderId,
+        });
+      } catch (err) {
+        if (isRefusal(err)) {
+          const reason = `Alpaca refused the order: ${errorText(err)}`;
+          journal(agent, args, entry, `rejected: ${reason}`);
+          return { ok: false, rejected: [reason], orders: [] };
+        }
+        const found = await trading
+          .getOrderByClientId(clientOrderId)
+          .catch(() => undefined);
+        if (found) return found;
+        const reason =
+          found === null
+            ? `Alpaca did not take the order: ${errorText(err)}`
+            : `unknown whether Alpaca took the order (${errorText(err)}); check client_order_id ${clientOrderId} before retrying`;
+        journal(
+          agent,
+          args,
+          entry,
+          `${found === null ? "rejected" : "unknown"}: ${reason}`,
         );
-    const brokerRejected = (err: Error): OrderResult => {
-      const reason = `Alpaca refused the order: ${err.message}`;
-      journal(agent, args, entry, `rejected: ${reason}`);
-      return { ok: false, rejected: [reason], orders: [] };
+        return { ok: false, rejected: [reason], orders: [] };
+      }
     };
-    const stopPrice = roundPrice(stop!, crypto);
+    const isOrder = (r: Order | OrderResult): r is Order => "id" in r;
     if (!crypto) {
       const request: OrderRequest = {
         symbol: args.ticker,
@@ -208,12 +323,12 @@ export function createOrderDesk(deps: OrderDeskDeps) {
         time_in_force: "gtc",
         order_class: target != null ? "bracket" : "oto",
         stop_loss: { stop_price: stopPrice },
-        ...(target != null && {
-          take_profit: { limit_price: roundPrice(target, false) },
+        ...(targetPrice != null && {
+          take_profit: { limit_price: targetPrice },
         }),
       };
       const order = await submitEntry(request);
-      if (order instanceof Error) return brokerRejected(order);
+      if (!isOrder(order)) return order;
       journal(agent, args, entry, `placed ${order.id}`);
       return { ok: true, rejected: [], orders: [order] };
     }
@@ -225,7 +340,7 @@ export function createOrderDesk(deps: OrderDeskDeps) {
       type: "market",
       time_in_force: "gtc",
     });
-    if (order instanceof Error) return brokerRejected(order);
+    if (!isOrder(order)) return order;
     // Journaled before waiting, so a guard run meanwhile already sees this trade's stop.
     journal(agent, args, entry, `placed ${order.id}`);
     const followUp = (outcome: string) =>
@@ -257,14 +372,37 @@ export function createOrderDesk(deps: OrderDeskDeps) {
       followUp(`waiting: ${note}`);
       return { ok: true, rejected: [], orders: [filled], note };
     }
+    // Sized from what is held, not what was ordered: Alpaca takes crypto fees out of the coins.
+    let stopQty: number;
+    try {
+      const [positions, open] = await Promise.all([
+        trading.getPositions(),
+        trading.getOpenOrders(),
+      ]);
+      const held =
+        positions.find((p) => sameSymbol(p.symbol, args.ticker))?.qty ?? 0;
+      stopQty = Number(
+        Math.min(filled.qty, held - coveredQty(args.ticker, open)).toFixed(9),
+      );
+    } catch (err) {
+      const note = `stop not placed (${errorText(err)}); the position guard covers the position`;
+      followUp(`failed: ${note}`);
+      return { ok: true, rejected: [], orders: [filled], note };
+    }
+    if (!(stopQty > 0)) {
+      const note =
+        "the position already has a stop (the position guard placed it)";
+      followUp(`skipped: ${note}`);
+      return { ok: true, rejected: [], orders: [filled], note };
+    }
     const stopOrder = await trading
       .placeOrder({
         symbol: args.ticker,
-        qty: String(filled.qty),
+        qty: String(stopQty),
         side: "sell",
         type: "stop_limit",
         stop_price: stopPrice,
-        limit_price: roundPrice(stopPrice * (1 - CRYPTO_STOP_LIMIT_GAP), true),
+        limit_price: roundPrice(stopPrice! * (1 - CRYPTO_STOP_LIMIT_GAP), true),
         time_in_force: "gtc",
       })
       .catch((err: unknown) => err as Error);
@@ -285,9 +423,15 @@ export function createOrderDesk(deps: OrderDeskDeps) {
   };
 
   const sell = async (args: OrderArgs, agent: string): Promise<OrderResult> => {
-    const position = (await trading.getPositions()).find((p) =>
-      sameSymbol(p.symbol, args.ticker),
-    );
+    let position;
+    try {
+      position = (await trading.getPositions()).find((p) =>
+        sameSymbol(p.symbol, args.ticker),
+      );
+    } catch (err) {
+      journal(agent, args, null, `failed: ${errorText(err)}`);
+      throw err;
+    }
     if (!position) {
       const rejected = [
         `no open ${args.ticker} position (this desk does not short)`,
@@ -295,18 +439,26 @@ export function createOrderDesk(deps: OrderDeskDeps) {
       journal(agent, args, null, `rejected: ${rejected[0]}`);
       return { ok: false, rejected, orders: [] };
     }
-    const open = (await trading.getOpenOrders()).filter((o) =>
-      sameSymbol(o.symbol, args.ticker),
-    );
-    for (const o of open) await trading.cancelOrder(o.id);
-    await trading.closePosition(args.ticker);
-    journal(
-      agent,
-      { ...args, qty: position.qty },
-      position.currentPrice,
-      `closed ${position.qty}, cancelled ${open.length} open order(s)`,
-    );
-    return { ok: true, rejected: [], orders: [] };
+    try {
+      const closed = await cancelAndClose(trading, args.ticker, sleep);
+      journal(
+        agent,
+        { ...args, qty: closed.qty || position.qty },
+        position.currentPrice,
+        closed.qty
+          ? `closed ${closed.qty}, cancelled ${closed.cancelled} open order(s)`
+          : `closed already: an order sold it while the ${closed.cancelled} open order(s) were cancelled`,
+      );
+      return { ok: true, rejected: [], orders: [] };
+    } catch (err) {
+      journal(
+        agent,
+        { ...args, qty: position.qty },
+        position.currentPrice,
+        `failed: ${errorText(err)}`,
+      );
+      throw err;
+    }
   };
 
   // BUYs run one at a time, so two concurrent requests cannot both spend the same limit.
@@ -320,7 +472,27 @@ export function createOrderDesk(deps: OrderDeskDeps) {
   return {
     place: (args: OrderArgs, agent: string) =>
       args.side === "buy" ? queuedBuy(args, agent) : sell(args, agent),
-    async cancel(orderId: string, agent: string) {
+    /** Entry orders only: stops and targets protect a position, and go when it is closed. */
+    async cancel(
+      orderId: string,
+      agent: string,
+    ): Promise<{ cancelled: string } | { error: string; status: 404 | 422 }> {
+      const order = allOrders(await trading.getOpenOrders()).find(
+        (o) => o.id === orderId,
+      );
+      if (!order) return { error: `No open order ${orderId}`, status: 404 };
+      if (order.side !== "buy")
+        return {
+          error:
+            "Only entry orders can be cancelled. Close the position instead.",
+          status: 422,
+        };
+      // Cancelling a partly filled bracket entry also cancels its stop, leaving the filled shares bare.
+      if (order.filledQty > 0)
+        return {
+          error: "This entry has partly filled. Close the position instead.",
+          status: 422,
+        };
       await trading.cancelOrder(orderId);
       store.addJournal(
         { agent, action: "cancel", outcome: `cancelled ${orderId}` },
@@ -330,3 +502,6 @@ export function createOrderDesk(deps: OrderDeskDeps) {
     },
   };
 }
+
+const errorText = (err: unknown) =>
+  err instanceof Error ? err.message : String(err);

@@ -71,7 +71,9 @@ function fakeTrading(state: {
     placeOrder: async (req) => {
       if (fail > 0) {
         fail--;
-        throw new Error("Alpaca 422: insufficient qty");
+        throw Object.assign(new Error("Alpaca 422: insufficient qty"), {
+          status: 422,
+        });
       }
       placed.push(req);
       return order({
@@ -79,7 +81,14 @@ function fakeTrading(state: {
         status: "accepted",
       });
     },
-    cancelOrder: async (id) => void cancelled.push(id),
+    getOrderByClientId: async () => null,
+    cancelOrder: async (id) => {
+      cancelled.push(id);
+      // Alpaca drops a cancelled order, and a cancelled parent takes its legs with it.
+      state.open = (state.open ?? [])
+        .filter((o) => o.id !== id)
+        .map((o) => ({ ...o, legs: o.legs.filter((l) => l.id !== id) }));
+    },
     closePosition: async (s) => void closed.push(s),
   };
   return {
@@ -124,6 +133,7 @@ function setup(
     trading: fake.trading,
     store,
     blockedReason: () => blocked,
+    guardActive: true,
     now: () => NOW,
     sleep: async () => {},
   });
@@ -154,6 +164,7 @@ describe("order desk", () => {
         order_class: "bracket",
         stop_loss: { stop_price: 95 },
         take_profit: { limit_price: 120 },
+        client_order_id: expect.any(String),
       },
     ]);
     expect(store.listJournal()[0]).toMatchObject({
@@ -299,7 +310,12 @@ describe("order desk", () => {
   });
 
   it("buys crypto at market, then places a separate stop-limit once filled", async () => {
-    const { store, desk, placed } = setup();
+    // Alpaca takes the fee out of the coins, so less than the 0.5 ordered is held.
+    const { store, desk, placed } = setup({
+      positions: [
+        position({ symbol: "BTCUSD", assetClass: "crypto", qty: 0.49875 }),
+      ],
+    });
     store.setApproval("BTC/USD", NOW + DAY * 1000, NOW);
     const r = await desk.place(
       { ticker: "BTC/USD", side: "buy", qty: 0.5, stop: 90, reason: "x" },
@@ -313,10 +329,11 @@ describe("order desk", () => {
         side: "buy",
         type: "market",
         time_in_force: "gtc",
+        client_order_id: expect.any(String),
       },
       {
         symbol: "BTC/USD",
-        qty: "0.5",
+        qty: "0.49875",
         side: "sell",
         type: "stop_limit",
         stop_price: 90,
@@ -390,6 +407,150 @@ describe("order desk", () => {
   });
 });
 
+describe("order desk safety", () => {
+  it("waits for a pending cancel to finish before closing the position", async () => {
+    const store = openStore(":memory:");
+    const fake = fakeTrading({ positions: [position({})] });
+    let open = [order({ id: "stop-1", side: "sell", type: "stop", qty: 10 })];
+    fake.trading.getOpenOrders = async () => open;
+    // Alpaca answers the DELETE at once; the order stays pending_cancel for a while.
+    fake.trading.cancelOrder = async () => {};
+    let openAtClose: Order[] | null = null;
+    fake.trading.closePosition = async () => void (openAtClose = open);
+    let sleeps = 0;
+    const desk = createOrderDesk({
+      config: DEFAULT_CONFIG,
+      marketData,
+      trading: fake.trading,
+      store,
+      blockedReason: () => null,
+      guardActive: true,
+      now: () => NOW,
+      sleep: async () => {
+        if (++sleeps === 2) open = [];
+      },
+    });
+    const r = await desk.place(
+      { ticker: "NVDA", side: "sell", reason: "x" },
+      "trader",
+    );
+    expect(r.ok).toBe(true);
+    expect(sleeps).toBe(2);
+    expect(openAtClose).toEqual([]);
+  });
+
+  it("cancels a filled bracket's legs, not just its parent, before closing", async () => {
+    const bracket = order({
+      id: "parent",
+      status: "filled",
+      qty: 10,
+      filledQty: 10,
+      orderClass: "bracket",
+      legs: [
+        order({ id: "leg-stop", side: "sell", type: "stop", qty: 10 }),
+        order({ id: "leg-target", side: "sell", type: "limit", qty: 10 }),
+      ],
+    });
+    const { desk, cancelled, closed } = setup({
+      positions: [position({})],
+      open: [bracket],
+    });
+    await desk.place({ ticker: "NVDA", side: "sell", reason: "x" }, "trader");
+    expect(cancelled).toEqual(
+      expect.arrayContaining(["leg-stop", "leg-target"]),
+    );
+    expect(closed).toEqual(["NVDA"]);
+  });
+
+  it("journals a SELL that fails, then rethrows", async () => {
+    const { desk, trading, store } = setup({ positions: [position({})] });
+    trading.closePosition = async () => {
+      throw new Error("Alpaca 403: insufficient qty available");
+    };
+    await expect(
+      desk.place({ ticker: "NVDA", side: "sell", reason: "x" }, "trader"),
+    ).rejects.toThrow(/403/);
+    expect(store.listJournal({ action: "order" })[0]!.outcome).toMatch(
+      /^failed: Alpaca 403/,
+    );
+  });
+
+  it("looks a BUY up by its client order id when the answer is lost", async () => {
+    const { desk, trading, store } = setup();
+    store.setApproval("NVDA", NOW + DAY * 1000, NOW);
+    let sentId = "";
+    trading.placeOrder = async (req) => {
+      sentId = String(req.client_order_id);
+      throw new Error("fetch failed: socket hang up");
+    };
+    trading.getOrderByClientId = async (id) =>
+      id === sentId ? order({ id: "live-1" }) : null;
+    const r = await desk.place(buy, "trader");
+    expect(r).toMatchObject({ ok: true, orders: [{ id: "live-1" }] });
+    expect(store.listJournal({ action: "order" })[0]!.outcome).toBe(
+      "placed live-1",
+    );
+
+    // When the lookup fails too, the outcome is unknown, never "rejected".
+    trading.getOrderByClientId = async () => {
+      throw new Error("still down");
+    };
+    const unknown = await desk.place(buy, "trader");
+    expect(unknown.ok).toBe(false);
+    expect(unknown.rejected[0]).toMatch(/unknown whether Alpaca took/);
+    expect(store.listJournal({ action: "order" })[0]!.outcome).toMatch(
+      /^unknown: /,
+    );
+  });
+
+  it("refuses crypto BUYs when no position guard runs", async () => {
+    const store = openStore(":memory:");
+    const fake = fakeTrading({});
+    const desk = createOrderDesk({
+      config: DEFAULT_CONFIG,
+      marketData,
+      trading: fake.trading,
+      store,
+      blockedReason: () => null,
+      guardActive: false,
+      now: () => NOW,
+      sleep: async () => {},
+    });
+    store.setApproval("BTC/USD", NOW + DAY * 1000, NOW);
+    const r = await desk.place(
+      { ticker: "BTC/USD", side: "buy", qty: 0.5, stop: 90, reason: "x" },
+      "trader",
+    );
+    expect(r.rejected.join()).toMatch(/position guard/);
+    expect(fake.placed).toEqual([]);
+  });
+
+  it("checks the stop after rounding, as Alpaca will see it", async () => {
+    const { desk, store, placed } = setup();
+    store.setApproval("NVDA", NOW + DAY * 1000, NOW);
+    // The ask is 100; 99.996 rounds to 100.00, which is not below it.
+    const r = await desk.place({ ...buy, stop: 99.996 }, "trader");
+    expect(r.rejected.join()).toMatch(/stop 100 must be below/);
+    expect(placed).toEqual([]);
+  });
+
+  it("cancels only unfilled entries, never a stop or target", async () => {
+    const stop = order({ id: "stop-1", side: "sell", type: "stop" });
+    const entry = order({ id: "entry-1" });
+    const { desk, cancelled } = setup({ open: [stop, entry] });
+    expect(await desk.cancel("stop-1", "trader")).toMatchObject({
+      status: 422,
+    });
+    expect(await desk.cancel("nope", "trader")).toMatchObject({
+      status: 404,
+    });
+    expect(await desk.cancel("entry-1", "trader")).toEqual({
+      cancelled: "entry-1",
+    });
+    expect(cancelled).toEqual(["entry-1"]);
+  });
+});
+
 describe("position guard", () => {
   function guardSetup(
     state: Parameters<typeof fakeTrading>[0],
@@ -408,6 +569,7 @@ describe("position guard", () => {
       store,
       alert: async (t) => void alerts.push(t),
       now: () => NOW,
+      sleep: async () => {},
       log: () => {},
     });
     return { store, guard, alerts, ...fake };
@@ -595,6 +757,162 @@ describe("position guard", () => {
     expect(cancelled).toEqual(["t1"]);
     expect(closed).toEqual(["NVDA"]);
     expect(placed).toEqual([]);
+  });
+
+  it("ignores the plan of a trade that has since been closed", async () => {
+    const { store, guard, placed } = guardSetup({ positions: [position({})] });
+    store.addJournal(
+      { agent: "trader", ticker: "NVDA", action: "plan", stop: 60 },
+      NOW - 2000,
+    );
+    store.addJournal(
+      {
+        agent: "trader",
+        ticker: "NVDA",
+        action: "order",
+        reason: "SELL: exit",
+        outcome: "closed 10, cancelled 1 open order(s)",
+      },
+      NOW - 1000,
+    );
+    await guard.runOnce();
+    expect(placed[0]!.stop_price).not.toBe(60);
+  });
+
+  it("forgets a plan once the guard has seen the position go flat", async () => {
+    const state: { positions: Position[] } = { positions: [position({})] };
+    const { store, guard, placed } = guardSetup(state);
+    store.addJournal(
+      { agent: "trader", ticker: "NVDA", action: "plan", stop: 60 },
+      NOW - 1000,
+    );
+    await guard.runOnce();
+    expect(placed[0]!.stop_price).toBe(60);
+    state.positions = [];
+    await guard.runOnce();
+    state.positions = [position({})]; // bought again elsewhere, with no new plan
+    placed.length = 0;
+    await guard.runOnce();
+    expect(placed[0]!.stop_price).not.toBe(60);
+  });
+
+  it("keeps a plan logged for the next entry after the old position closed", async () => {
+    const store = openStore(":memory:");
+    const state: { positions: Position[] } = { positions: [position({})] };
+    const fake = fakeTrading(state);
+    let t = NOW;
+    const guard = createGuard({
+      config: DEFAULT_CONFIG,
+      marketData,
+      trading: fake.trading,
+      store,
+      alert: async () => {},
+      now: () => t,
+      sleep: async () => {},
+      log: () => {},
+    });
+    store.addJournal(
+      { agent: "trader", ticker: "NVDA", action: "plan", stop: 60 },
+      t - 1000,
+    );
+    await guard.runOnce(); // old trade, stop 60
+    state.positions = []; // it closes
+    t += 60_000;
+    store.addJournal(
+      { agent: "trader", ticker: "NVDA", action: "plan", stop: 94 },
+      t,
+    ); // plan for the next entry, before the guard notices the close
+    t += 60_000;
+    await guard.runOnce(); // flat
+    state.positions = [position({})];
+    fake.placed.length = 0;
+    t += 60_000;
+    await guard.runOnce();
+    expect(fake.placed[0]!.stop_price).toBe(94);
+  });
+
+  it("finds the placed BUY's stop past many rejected attempts", async () => {
+    const { store, guard, placed } = guardSetup({ positions: [position({})] });
+    store.addJournal(
+      {
+        agent: "trader",
+        ticker: "NVDA",
+        action: "order",
+        stop: 91,
+        reason: "BUY: x",
+        outcome: "placed abc",
+      },
+      NOW - 10_000,
+    );
+    for (let i = 0; i < 600; i++)
+      store.addJournal(
+        {
+          agent: "trader",
+          ticker: "NVDA",
+          action: "order",
+          reason: "BUY: retry",
+          outcome: "rejected: limit",
+        },
+        NOW - 9000 + i,
+      );
+    await guard.runOnce();
+    expect(placed[0]).toMatchObject({ stop_price: 91 });
+  });
+
+  it("leaves the target in place when it cannot work out a stop", async () => {
+    const target = order({ id: "t1", side: "sell", type: "limit", qty: 10 });
+    const store = openStore(":memory:");
+    const fake = fakeTrading({ positions: [position({})], open: [target] });
+    const guard = createGuard({
+      config: DEFAULT_CONFIG,
+      marketData: {
+        ...marketData,
+        getBars: async () => {
+          throw new Error("bars down");
+        },
+      } as unknown as MarketData,
+      trading: fake.trading,
+      store,
+      alert: async () => {},
+      now: () => NOW,
+      sleep: async () => {},
+      log: () => {},
+    });
+    await guard.runOnce();
+    expect(fake.cancelled).toEqual([]);
+    expect(fake.placed).toEqual([]);
+  });
+
+  it("cancels the rest of a partly filled bracket entry, then covers what filled", async () => {
+    const entry = order({
+      id: "entry-1",
+      qty: 10,
+      filledQty: 4,
+      status: "partially_filled",
+      orderClass: "bracket",
+      legs: [
+        order({
+          id: "held-stop",
+          side: "sell",
+          type: "stop",
+          qty: 10,
+          status: "held",
+        }),
+      ],
+    });
+    const { guard, placed, cancelled, store } = guardSetup({
+      positions: [position({ qty: 4, marketValue: 400 })],
+      open: [entry],
+    });
+    store.addJournal(
+      { agent: "trader", ticker: "NVDA", action: "plan", stop: 95 },
+      NOW - 1000,
+    );
+    await guard.runOnce();
+    expect(cancelled).toEqual(["entry-1"]);
+    expect(placed).toEqual([
+      expect.objectContaining({ qty: "4", type: "stop", stop_price: 95 }),
+    ]);
   });
 
   it("alerts once a day on limit breaches", async () => {

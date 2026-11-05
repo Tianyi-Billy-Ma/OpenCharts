@@ -105,6 +105,14 @@ In the Cloudflare Zero Trust dashboard, go to **Access → Applications → Add 
 - **Domain:** `charts.example.com`.
 - **Policy:** Allow, with the rule *Emails* set to your own address.
 
+Then list the hostname in `opencharts.config.ts`, so the terminal's account and order routes answer on it (they refuse unknown hostnames, which stops DNS-rebinding pages):
+
+```ts
+export default {
+  allowedHosts: ["charts.example.com"],
+};
+```
+
 Do not add `mcp.example.com` to Access. Bots cannot complete a browser login, and the bearer token already guards that hostname.
 
 ## 5. Check it

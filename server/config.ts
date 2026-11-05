@@ -14,6 +14,13 @@ export interface OpenChartsConfig {
   /** Port the backend listens on. It binds to 127.0.0.1 unless `host` says otherwise. */
   port: number;
   host: string;
+  /**
+   * Hostnames (no port) the browser may use to reach the account routes
+   * (/api/trading, /api/journal.csv), besides localhost and `host`. Add your
+   * domain here when the terminal sits behind e.g. Cloudflare Access. Anything
+   * else is refused, which stops DNS-rebinding pages from trading.
+   */
+  allowedHosts: string[];
   watchlist: {
     /** US stock and ETF tickers, e.g. "NVDA". */
     stocks: string[];
@@ -69,6 +76,7 @@ export interface OpenChartsConfig {
 export const DEFAULT_CONFIG: OpenChartsConfig = {
   port: 8787,
   host: "127.0.0.1",
+  allowedHosts: [],
   watchlist: {
     stocks: [
       "NVDA",

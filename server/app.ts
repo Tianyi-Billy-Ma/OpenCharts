@@ -316,6 +316,22 @@ export function createApp(options: AppOptions): {
     createReadStream(file).pipe(res);
   };
 
+  const hosts = new Set(
+    [
+      "localhost",
+      "127.0.0.1",
+      "[::1]",
+      options.config.host,
+      ...(options.config.allowedHosts ?? []),
+    ].map((h) => h.toLowerCase()),
+  );
+  const hostAllowed = (header: string | undefined) => {
+    if (!header) return false;
+    // "[::1]:8787" keeps its brackets; "localhost:8787" drops the port.
+    const name = header.toLowerCase().replace(/:\d+$/, "");
+    return hosts.has(name);
+  };
+
   const server = createServer((req, res) => {
     let url: URL;
     try {
@@ -334,6 +350,13 @@ export function createApp(options: AppOptions): {
       });
       return;
     }
+    // The account routes answer only on known hostnames: a DNS-rebinding page sends its own.
+    if (
+      (url.pathname.startsWith("/api/trading/") ||
+        url.pathname === "/api/journal.csv") &&
+      !hostAllowed(req.headers.host)
+    )
+      return sendJson(res, 403, { error: "Unknown Host" });
     if (url.pathname.startsWith("/api/trading/")) {
       const trading = options.trading;
       const run = trading
