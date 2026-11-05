@@ -7,7 +7,12 @@ import {
 } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import type { Symbol } from "../src/services/schemas.ts";
-import { isCrypto, type AlpacaQuote, type MarketData } from "./alpaca.ts";
+import {
+  isCrypto,
+  timeframeSeconds,
+  type AlpacaQuote,
+  type MarketData,
+} from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import { deskSignalBars } from "./desk-tools.ts";
 import type { GuardStatus } from "./guard.ts";
@@ -51,7 +56,6 @@ export interface AppOptions {
   trading?: Omit<TerminalTradingOptions, "toAlpaca">;
 }
 
-const TIMEFRAMES = new Set(["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]);
 const HEARTBEAT_MS = 15_000;
 /** A tab that stops reading gets dropped once this much is queued for it. */
 const MAX_CLIENT_BUFFER_BYTES = 1_000_000;
@@ -201,7 +205,7 @@ export function createApp(options: AppOptions): {
           return sendJson(res, 404, {
             error: `Unknown symbol "${symbolParam}"`,
           });
-        if (!TIMEFRAMES.has(timeframe))
+        if (timeframeSeconds(timeframe) == null)
           return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
         const limit = optionalNumber(url.searchParams.get("limit"));
         const fromMs = optionalNumber(url.searchParams.get("fromMs"));
@@ -238,7 +242,7 @@ export function createApp(options: AppOptions): {
           return sendJson(res, 404, {
             error: `Unknown symbol "${symbolParam}"`,
           });
-        if (!TIMEFRAMES.has(timeframe))
+        if (timeframeSeconds(timeframe) == null)
           return sendJson(res, 400, { error: `Bad timeframe "${timeframe}"` });
         if (limit === null || limit < 1 || limit > 5000)
           return sendJson(res, 400, {
@@ -313,7 +317,10 @@ export function createApp(options: AppOptions): {
         ? "public, max-age=31536000, immutable"
         : "no-cache",
     });
-    createReadStream(file).pipe(res);
+    // A read error (file swapped by a rebuild, EACCES) arrives as an event; unhandled it kills the server.
+    createReadStream(file)
+      .on("error", () => res.destroy())
+      .pipe(res);
   };
 
   const hosts = new Set(

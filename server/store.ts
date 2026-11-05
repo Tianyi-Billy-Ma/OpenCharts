@@ -277,8 +277,12 @@ export function addTradingDays(fromMs: number, days: number, crypto: boolean): n
   const d = new Date(fromMs);
   for (let left = days; left > 0; ) {
     d.setUTCDate(d.getUTCDate() + 1);
-    const weekday = d.getUTCDay();
-    if (crypto || (weekday !== 0 && weekday !== 6)) left--;
+    // The weekday in New York: a Friday-evening approval there is already Saturday in UTC.
+    const weekday = d.toLocaleDateString("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+    });
+    if (crypto || (weekday !== "Sat" && weekday !== "Sun")) left--;
   }
   return d.getTime();
 }

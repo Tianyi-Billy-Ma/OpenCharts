@@ -2,7 +2,12 @@
 import { describe, expect, it } from "vitest";
 import type { MarketData } from "../../server/alpaca.ts";
 import { DEFAULT_CONFIG, type OpenChartsConfig } from "../../server/config.ts";
-import { MACRO_EVENTS, newYorkDate, upcomingEvents } from "../../server/events.ts";
+import {
+  MACRO_EVENTS,
+  newYorkDate,
+  newYorkEndOfDay,
+  upcomingEvents,
+} from "../../server/events.ts";
 import { createScanner, handoffText } from "../../server/scanner.ts";
 import { openStore } from "../../server/store.ts";
 import {
@@ -134,6 +139,53 @@ describe("signal scanner", () => {
     expect(found.map((f) => [f.signal, f.barTime])).toEqual([["BUY", TODAY - DAY]]);
   });
 
+  it("still checks a bar that settled during a skipped pass", async () => {
+    // Daily bars: the BUY bar, then a quiet one. The pass that would have seen the BUY on its own never ran.
+    const series = bars();
+    const quiet = { ...series[series.length - 2]!, time: TODAY, volume: 1000 };
+    let data = series.slice(0, -1);
+    let nowMs = (TODAY - DAY + 20 * 60) * 1000;
+    const store = openStore(":memory:");
+    const scanner = createScanner({
+      config,
+      marketData: { getBars: async ({ limit = 500 }) => data.slice(-limit) } as MarketData,
+      store,
+      webhooks: null,
+      now: () => nowMs,
+      log: () => {},
+    });
+    expect(await scanner.scanOnce()).toEqual([]);
+    data = [...series, quiet];
+    nowMs = (TODAY + DAY + 20 * 60) * 1000;
+    const found = await scanner.scanOnce();
+    expect(found.map((f) => [f.signal, f.barTime])).toEqual([["BUY", TODAY - DAY]]);
+  });
+
+  it("skips the fetch until another bar can have settled", async () => {
+    let calls = 0;
+    let nowMs = (TODAY + 20 * 60) * 1000;
+    const scanner = createScanner({
+      config,
+      marketData: {
+        getBars: async (r) => {
+          calls++;
+          return marketData.getBars(r);
+        },
+      } as MarketData,
+      store: openStore(":memory:"),
+      webhooks: null,
+      now: () => nowMs,
+      log: () => {},
+    });
+    await scanner.scanOnce();
+    nowMs += 5 * 60_000;
+    await scanner.scanOnce();
+    expect(calls).toBe(1);
+    nowMs = (TODAY + DAY + 20 * 60) * 1000; // today's bar has closed and settled
+    await scanner.scanOnce();
+    expect(calls).toBe(2);
+  });
+
   it("checks the approval when the signal is found, not when the pass started", async () => {
     let now = (TODAY + 20 * 60) * 1000;
     const { impl, calls } = fakeFetch(0);
@@ -228,6 +280,29 @@ describe("webhooks", () => {
     expect(text).toBe(
       "NVDA | SELL: 1d close broke the 20-bar low | close 90.00 vs 20-bar low 95.00, volume 2.0x its average, RSI 30.0, trend bearish, ATR 3.00 | Trader: exit or tighten the stop on any long; no shorts",
     );
+  });
+});
+
+describe("webhook retries", () => {
+  it("gives up at once on a 4xx that is not 408 or 429", async () => {
+    let calls = 0;
+    const impl = (async () => {
+      calls++;
+      return new Response("no", { status: 401 });
+    }) as unknown as typeof fetch;
+    const r = await deliverWebhook("https://hooks.example.com/x", "{}", SECRET, "id", {
+      fetchImpl: impl,
+      retryDelaysMs: [0, 0, 0],
+    });
+    expect(r).toMatchObject({ ok: false, attempts: 1, error: "HTTP 401" });
+    expect(calls).toBe(1);
+  });
+});
+
+describe("New York days", () => {
+  it("ends a date-only approval at New York midnight, in winter and summer", () => {
+    expect(new Date(newYorkEndOfDay("2026-11-12")).toISOString()).toBe("2026-11-13T04:59:59.999Z");
+    expect(new Date(newYorkEndOfDay("2026-07-01")).toISOString()).toBe("2026-07-02T03:59:59.999Z");
   });
 });
 

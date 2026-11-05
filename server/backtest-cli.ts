@@ -20,7 +20,8 @@ const flag = (name: string) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const symbol = args.find((a, i) => !a.startsWith("--") && !args[i - 1]?.startsWith("--"));
+const VALUE_FLAGS = new Set(["--timeframe", "--years"]);
+const symbol = args.find((a, i) => !a.startsWith("--") && !VALUE_FLAGS.has(args[i - 1] ?? ""));
 if (!symbol) {
   console.error("Usage: npm run backtest -- <SYMBOL> [--timeframe 1d] [--years 3] [--json]");
   process.exit(1);
@@ -40,13 +41,20 @@ const alpaca = createAlpacaClient({
   log: () => {},
 });
 
-// shortcut: one request caps at 10,000 bars (about 3 years of 1h stock bars); page by date for longer runs.
-const bars = await alpaca
-  .getBars({ symbol, timeframe, fromMs: Date.now() - years * 365.25 * 86_400_000, limit: 10_000 })
-  .catch((err: unknown) => {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  });
+// One request caps at 10,000 bars (oldest first), so page forward by date until the history runs out.
+const loadBars = async () => {
+  const all = [];
+  for (let from = Date.now() - years * 365.25 * 86_400_000; ; ) {
+    const page = await alpaca.getBars({ symbol, timeframe, fromMs: from, limit: 10_000 });
+    all.push(...page);
+    if (page.length < 10_000) return all;
+    from = page[page.length - 1]!.time * 1000 + 1;
+  }
+};
+const bars = await loadBars().catch((err: unknown) => {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});
 const candles = closedBars(bars, barCloseSeconds(seconds, !isCrypto(symbol)));
 const result = runBacktest(candles, deskSignal(candles, config.deskSignal.params));
 

@@ -284,5 +284,10 @@ describe("approvals store", () => {
 
     expect(new Date(addTradingDays(NOW, 1, false)).toISOString()).toBe("2026-11-09T21:00:00.000Z");
     expect(new Date(addTradingDays(NOW, 5, true)).toISOString()).toBe("2026-11-11T21:00:00.000Z");
+    // Friday 20:30 in New York is already Saturday in UTC; it still counts as a Friday start.
+    const fridayEvening = Date.parse("2026-11-07T01:30:00Z");
+    expect(new Date(addTradingDays(fridayEvening, 5, false)).toISOString()).toBe(
+      "2026-11-14T01:30:00.000Z",
+    );
   });
 });

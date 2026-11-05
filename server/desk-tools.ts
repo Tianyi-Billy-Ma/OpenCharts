@@ -7,7 +7,7 @@ import {
 import { atr, bollingerBands, macd, rsi, sma, volumeSma } from "../src/lib/indicators.ts";
 import { isCrypto, timeframeSeconds, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
-import { newYorkDate, upcomingEvents } from "./events.ts";
+import { newYorkDate, newYorkEndOfDay, upcomingEvents } from "./events.ts";
 import type { McpTool } from "./mcp.ts";
 import type { OrderDesk } from "./orders.ts";
 import { addTradingDays, type Store } from "./store.ts";
@@ -31,7 +31,8 @@ const PAIR = /^[A-Z0-9]{2,10}\/[A-Z]{3,4}$/;
 
 /** Bars needed before the first useful Desk Signal value (EMA 200, then the 100-bar ATR rank). */
 export const warmUpBars = (config: OpenChartsConfig) =>
-  Math.max(...config.deskSignal.params.emaPeriods) + config.deskSignal.params.atrLookback;
+  // 3x the longest EMA: its SMA seed then weighs under 0.3%, so the trend matches the chart's and the backtest's.
+  3 * Math.max(...config.deskSignal.params.emaPeriods) + config.deskSignal.params.atrLookback;
 
 /** Desk Signal on closed bars, the last `limit` of them. Shared by the HTTP route and MCP. */
 export async function deskSignalBars(
@@ -196,7 +197,8 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
         if (!bar) return { symbol: s, timeframe: tf, error: "No closed bars" };
         const m = macd(candles);
         const bb = bollingerBands(candles);
-        const volAvg = last(volumeSma(candles, 20));
+        // The 20 bars before this one, as the signal compares them.
+        const volAvg = last(volumeSma(candles.slice(0, -1), 20));
         const ema = Object.fromEntries(
           config.deskSignal.params.emaPeriods.map((p, i) => [`ema${p}`, round(bar.emas[i])]),
         );
@@ -391,7 +393,8 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
           ticker: symbolArg,
           until: {
             type: "string",
-            description: "ISO 8601 date or time in the future, e.g. 2026-11-12",
+            description:
+              "ISO 8601 date or time in the future. A date alone (2026-11-12) lasts through that day in New York.",
           },
           reason: { type: "string", description: "Why, for the journal" },
         },
@@ -402,7 +405,9 @@ export function createDeskTools(deps: DeskDeps): McpTool[] {
         const at = now();
         const untilArg = str(args, "until");
         const until = untilArg
-          ? Date.parse(untilArg)
+          ? /^\d{4}-\d{2}-\d{2}$/.test(untilArg)
+            ? newYorkEndOfDay(untilArg)
+            : Date.parse(untilArg)
           : addTradingDays(at, config.approvals.tradingDays, isCrypto(ticker));
         if (!Number.isFinite(until) || until <= at)
           throw new Error(`until must be a future date, got "${untilArg}"`);

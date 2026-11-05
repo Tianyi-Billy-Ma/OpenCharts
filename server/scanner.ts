@@ -2,7 +2,7 @@ import { volumeSma } from "../src/lib/indicators.ts";
 import { isCrypto, timeframeSeconds, type MarketData } from "./alpaca.ts";
 import type { OpenChartsConfig } from "./config.ts";
 import { deskSignalBars } from "./desk-tools.ts";
-import type { DeskSignalBar } from "../src/lib/desk-signal.ts";
+import { barCloseSeconds, type DeskSignalBar } from "../src/lib/desk-signal.ts";
 import type { Candle } from "../src/services/schemas.ts";
 import type { SignalRecord, Store } from "./store.ts";
 import { deliverWebhook, type DeliverOptions } from "./webhooks.ts";
@@ -56,6 +56,9 @@ export function handoffText(s: Pick<SignalRecord, "symbol" | "timeframe" | "sign
   return `${s.symbol} | ${idea} | ${evidence} | ${next}`;
 }
 
+/** Most bars one pass looks back over after a gap. */
+const MAX_CATCH_UP_BARS = 500;
+
 export function createScanner(deps: ScannerDeps) {
   const { config, store, webhooks } = deps;
   const now = deps.now ?? Date.now;
@@ -96,11 +99,20 @@ export function createScanner(deps: ScannerDeps) {
       log(`webhook to ${r.host} failed after ${r.attempts} tries: ${r.error}`);
   };
 
-  // Bars that can settle between two passes; more than one when bars are shorter than the interval.
   const barSeconds = timeframeSeconds(timeframe) ?? 86_400;
   const everySeconds = config.scanner.everyMinutes * 60;
-  const recent =
-    barSeconds >= everySeconds ? 1 : Math.min(50, Math.ceil(everySeconds / barSeconds) + 1);
+  // Newest bar checked per symbol, so a late or skipped pass still checks every bar since.
+  // The first pass looks back one interval: older bars are history, not news.
+  const lastChecked = new Map<string, number>();
+  const barsToCheck = (symbol: string, settledMs: number) => {
+    const since = lastChecked.get(symbol);
+    if (since == null)
+      return barSeconds >= everySeconds
+        ? 1
+        : Math.min(MAX_CATCH_UP_BARS, Math.ceil(everySeconds / barSeconds) + 1);
+    // shortcut: capped so one fetch stays bounded; a scanner down for longer skips the rest.
+    return Math.min(MAX_CATCH_UP_BARS, Math.ceil((settledMs / 1000 - since) / barSeconds) + 1);
+  };
 
   /** Save a signal bar once. Returns null when it was already saved. */
   const record = (symbol: string, bar: DeskSignalBar, history: Candle[], at: number) => {
@@ -155,26 +167,49 @@ export function createScanner(deps: ScannerDeps) {
     const at = now();
     const settled = at - config.scanner.settleMinutes * 60_000;
     const found: SignalRecord[] = [];
+    // Sent in parallel and awaited at the end, so a slow receiver never delays the next symbol.
+    const sending: Promise<void>[] = [];
     for (const symbol of symbols) {
+      // No fetch until the next bar can have closed and settled.
+      const since = lastChecked.get(symbol);
+      const closeSeconds = barCloseSeconds(barSeconds, !isCrypto(symbol));
+      if (since != null && settled < (since + barSeconds + closeSeconds) * 1000) continue;
       try {
-        const { bars, candles } = await deskSignalBars(deps, symbol, timeframe, recent, settled);
+        const { bars, candles } = await deskSignalBars(
+          deps,
+          symbol,
+          timeframe,
+          barsToCheck(symbol, settled),
+          settled,
+        );
         lastError.delete(symbol);
+        let inOrder = Promise.resolve();
+        const newest = bars.at(-1)?.time;
+        if (newest != null) lastChecked.set(symbol, Math.max(newest, since ?? -Infinity));
         for (let k = 0; k < bars.length; k++) {
           const bar = bars[k]!;
-          if (!bar.signal) continue;
+          if (!bar.signal || (since != null && bar.time <= since)) continue;
           // This bar and the candles before it, for the evidence.
           const history = candles.slice(0, candles.length - bars.length + k + 1);
           const saved = record(symbol, bar, history, at);
           // shortcut: a crash mid-send leaves the signal "pending" and it is not resent; resend on start if that matters.
-          if (saved?.webhook === "pending") await send(saved);
+          // Chained per symbol, so a retried older signal never lands after a newer one.
+          if (saved?.webhook === "pending")
+            inOrder = inOrder.then(() =>
+              send(saved).catch((err: unknown) =>
+                log(`${symbol}: webhook not recorded: ${err instanceof Error ? err.message : String(err)}`),
+              ),
+            );
           if (saved) found.push(saved);
         }
+        sending.push(inOrder);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (lastError.get(symbol) !== message) log(`${symbol}: ${message}`);
         lastError.set(symbol, message);
       }
     }
+    await Promise.all(sending);
     return found;
   };
 

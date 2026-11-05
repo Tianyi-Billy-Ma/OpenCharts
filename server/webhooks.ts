@@ -80,7 +80,7 @@ export interface DeliverOptions {
   nowMs?: () => number;
 }
 
-/** POST `body` to `url`, retrying on network errors and non-2xx answers. */
+/** POST `body` to `url`, retrying on network errors, 5xx, 408 and 429. */
 export async function deliverWebhook(
   url: string,
   body: string,
@@ -108,8 +108,12 @@ export async function deliverWebhook(
         body,
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
+      await res.body?.cancel().catch(() => {}); // free the socket; the body is never read
       if (res.ok) return { host, ok: true, attempts: attempt };
       error = `HTTP ${res.status}`;
+      // Any other 4xx is the receiver saying no (bad URL, auth); retrying cannot fix it.
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429)
+        return { host, ok: false, attempts: attempt, error };
     } catch (err) {
       // fetch errors can quote the URL, which may hold a token, so keep only a safe code.
       const e = err as { name?: string; cause?: { code?: unknown } };

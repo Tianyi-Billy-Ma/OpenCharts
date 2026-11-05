@@ -80,3 +80,11 @@ export function upcomingEvents(fromDate: string, days: number): MacroEvent[] {
 /** Today's date in New York, YYYY-MM-DD. */
 export const newYorkDate = (ms: number) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(ms);
+
+/** The last millisecond of a New York calendar day ("YYYY-MM-DD"). */
+export function newYorkEndOfDay(date: string): number {
+  // New York's next midnight falls at 04:00 or 05:00 UTC; step up to it from 03:00.
+  let t = Date.parse(`${date}T00:00:00Z`) + 27 * 3_600_000;
+  while (newYorkDate(t) === date) t += 3_600_000;
+  return t - 1;
+}
