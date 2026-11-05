@@ -75,7 +75,7 @@ export function createGuard(deps: GuardDeps) {
     // Queried by action, so scanner and note rows can never push the plan out of reach.
     const planned = [
       ...store.listJournal({ ticker, action: "order", limit: 500 }),
-      ...store.listJournal({ ticker, action: "plan", limit: 1 }),
+      ...store.listJournal({ ticker, action: "plan", limit: 50 }),
     ]
       .filter(
         (e) =>
