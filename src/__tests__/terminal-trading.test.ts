@@ -21,6 +21,7 @@ const order = (o: Partial<Order>): Order => ({
   qty: 10,
   filledQty: 0,
   notional: null,
+  filledAvgPrice: null,
   status: "accepted",
   stopPrice: null,
   limitPrice: null,
