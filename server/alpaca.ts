@@ -7,6 +7,7 @@
  */
 
 import type { Candle } from "../src/services/schemas.ts";
+import type { Fill } from "./review.ts";
 
 const DATA_BASE = "https://data.alpaca.markets";
 const PAPER_BASE = "https://paper-api.alpaca.markets";
@@ -231,7 +232,9 @@ export interface AlpacaClientOptions {
   live?: boolean;
 }
 
-export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketData & Trading {
+export function createAlpacaClient(
+  options: AlpacaClientOptions = {},
+): MarketData & Trading & { getFills(): Promise<Fill[]> } {
   const doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   const SocketImpl = options.webSocketImpl ?? globalThis.WebSocket;
   const log = options.log ?? ((m: string) => console.log(`[alpaca] ${m}`));
@@ -372,6 +375,30 @@ export function createAlpacaClient(options: AlpacaClientOptions = {}): MarketDat
       url.searchParams.set("nested", "true");
       url.searchParams.set("limit", "500");
       return ((await getJson(url)) as Record<string, unknown>[]).map(toOrder);
+    },
+
+    /** Every fill on the account, oldest first (FILL account activities). */
+    async getFills() {
+      const fills: Fill[] = [];
+      for (let token: string | undefined; ; ) {
+        const url = trading("/v2/account/activities/FILL");
+        url.searchParams.set("direction", "asc");
+        url.searchParams.set("page_size", "100");
+        if (token) url.searchParams.set("page_token", token);
+        const page = (await getJson(url)) as Array<Record<string, string>>;
+        for (const a of page) {
+          if (a.side !== "buy" && a.side !== "sell") continue;
+          fills.push({
+            symbol: a.symbol!,
+            side: a.side,
+            qty: Number(a.qty),
+            price: Number(a.price),
+            time: Date.parse(a.transaction_time!),
+          });
+        }
+        if (page.length < 100) return fills;
+        token = page[page.length - 1]!.id;
+      }
     },
 
     async getOrder(id) {

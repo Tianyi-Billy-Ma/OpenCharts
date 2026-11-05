@@ -250,7 +250,7 @@ the browser never sees them.
    hard limits, our order tools, position guard) and M4b (paper trading and
    the signals panel in the terminal, Sheets export, nginx deploy option).
 6. **M5, review:** 60 trading days of paper results vs backtest, then the
-   go-live decision.
+   go-live decision. `npm run review` produces the comparison.
 
 ## 9. Decisions
 
